@@ -586,8 +586,19 @@ return { name: currentUser };
       <tr><td><code>Date</code>, <code>Map</code>, <code>Set</code>, class instances</td><td>non-plain objects; return <code>date.toISOString()</code> instead</td></tr>
       <tr><td>a <code>__proto__</code> key</td><td>would set the prototype of the client object</td></tr>
       <tr><td>nesting deeper than 64 levels</td><td>bounded to prevent stack exhaustion</td></tr>
+      <tr><td>more than 1 MB in one export</td><td>bounded so an unbounded query cannot be serialized into the page</td></tr>
     </tbody>
   </table>
+
+  <p>The size budget is spent as the value is walked, so an oversized result fails as soon as the
+  limit is crossed rather than after the whole structure has been copied. The error names the path
+  where it ran out:</p>
+
+<pre><code>Cannot export more than 1048576 bytes; limit reached at $[8421].email</code></pre>
+
+  <p>The limit is per export, not per request or per page: each <code>var</code> block gets its own
+  1 MB budget. If you are approaching it, the data almost certainly wants paginating or fetching
+  from the client rather than inlining into the document.</p>
 
   <p>See <a href="#security">Security</a> for why these are enforced rather than conveniences.</p>
 </section>
@@ -663,8 +674,8 @@ app.get('/profile', async (req, res, next) =&gt; {
   <div class="sig">clearShared()</div>
   <p>Empties the cache. Intended for tests.</p>
 
-  <div class="sig">serialize(value) &middot; assertSerializable(value) &middot; MAX_DEPTH</div>
-  <p>The export serializer, its validator, and the depth limit (64).</p>
+  <div class="sig">serialize(value) &middot; assertSerializable(value) &middot; MAX_DEPTH &middot; MAX_EXPORT_BYTES</div>
+  <p>The export serializer, its validator, the depth limit (64), and the per-export size limit (1 MB).</p>
 
   <div class="sig">scan(input)</div>
   <p>The low-level scanner. Returns <code>{ source, parts }</code> with byte offsets.</p>
@@ -742,7 +753,8 @@ emitted: &lt;script&gt;const v="require(\"fs\"); doSomething();";&lt;/script&gt;
     <li>No router, hot reload, body parser, sessions, or database abstraction.</li>
     <li><code>renderToBuffer()</code> copies the whole page into one buffer; <code>render()</code>
       writes the static buffers directly and is about 16x cheaper per request.</li>
-    <li>There is no size cap on an exported value; only depth is bounded.</li>
+    <li>Exports are capped at 1 MB and 64 levels of nesting; the limits are constants, not yet
+      configurable per page.</li>
   </ul>
 </section>
 

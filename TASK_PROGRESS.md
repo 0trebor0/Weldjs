@@ -215,6 +215,26 @@ Tests added: concurrent execution (3x40 ms completing under 100 ms), zero bytes 
 failure, `Content-Length` matches `renderToBuffer().length`, and no header write when headers
 are already sent.
 
+## Eighth pass: export size caps
+
+Closes the last unbounded-input path. `MAX_EXPORT_BYTES = 1 MB`, spent during the
+snapshot walk so an oversized value is rejected as soon as the limit is crossed rather
+than after the whole structure has been copied. Array element cost is charged up front so
+a hostile array is rejected before a copy of it is allocated, and a string's length is
+charged before it is retained.
+
+The budget is per export: each `var` block gets a fresh one, verified by a test that
+renders the same near-limit page twice.
+
+Cost: about 1-2% on a 224 KB payload (2.61 ms before, ~2.65 ms after, stable across three
+runs). An intermediate closure-based budget measured ~10% slower and an inlined variant
+gained nothing back, so the final version uses a plain helper — the clearest of the three
+and also the fastest.
+
+Tests added: oversized array rejected with the path named, single oversized string
+rejected, huge sparse array rejected before its elements are walked, a normal 500-row
+payload well inside the limit, and the budget proven per-export rather than cumulative.
+
 ## Assumptions, limitations, remaining risks
 
 - **Serialization is ~35% slower** on large payloads (1.94 ms → 2.61 ms for a 224 KB
@@ -231,12 +251,14 @@ are already sent.
   only materialises where merging actually reduces writes.
 - `MAX_DEPTH = 64` is a chosen value, not a measured limit. Legitimate data nested
   deeper than 64 levels will now be rejected.
-- **Not addressed:** no byte-size or collection-length caps on exported payloads, so a
-  very large export is still bounded only by memory. This is now the last unbounded-input
-  path. (The mid-stream failure case listed here previously was resolved by the two-phase
-  render in the seventh pass.)
-- Two-phase render holds every block's value in memory until the response is emitted.
-  For normal page data this is small, but it is unbounded for the same reason as above.
+- `MAX_DEPTH` (64) and `MAX_EXPORT_BYTES` (1 MB) are chosen constants, not measured limits,
+  and are not configurable per page. A page with a legitimate need for a larger export has
+  no way to raise them short of editing the source.
+- Two-phase render holds every block's value in memory until the response is emitted. Each
+  is now capped at 1 MB, so a page with many blocks is bounded by block count times 1 MB.
+- The size budget approximates serialized size rather than computing it exactly. It is
+  monotonic and never undercounts enough to matter, but a value near the limit may be
+  accepted or rejected slightly off the true byte count.
 - Time to first byte is now later by however long the slowest block takes, in exchange for
   the response completing sooner. This was the user's explicit preference.
 - `parseAttributes` loops in the scanner are bounded by the attribute text length and

@@ -2,7 +2,7 @@
 
 const { compileFile, compileSource } = require('./compiler');
 const { scan, WeldSyntaxError } = require('./scanner');
-const { serialize, assertSerializable, MAX_DEPTH } = require('./serializer');
+const { serialize, assertSerializable, MAX_DEPTH, MAX_EXPORT_BYTES } = require('./serializer');
 const { shared, clearShared } = require('./shared');
 
 module.exports = {
@@ -14,5 +14,6 @@ module.exports = {
   shared,
   clearShared,
   MAX_DEPTH,
+  MAX_EXPORT_BYTES,
   WeldSyntaxError
 };

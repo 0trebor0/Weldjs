@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const vm = require('node:vm');
 const { EventEmitter } = require('node:events');
-const { compileSource, scan, serialize, clearShared, MAX_DEPTH } = require('../src');
+const { compileSource, scan, serialize, clearShared, MAX_DEPTH, MAX_EXPORT_BYTES } = require('../src');
 
 test.afterEach(() => clearShared());
 
@@ -116,6 +116,54 @@ test('nesting at the depth limit still serializes', () => {
   }
 
   assert.doesNotThrow(() => serialize(root));
+});
+
+test('an oversized export is rejected', () => {
+  const rows = [];
+  for (let i = 0; i < 40000; i += 1) {
+    rows.push({ id: i, name: `user number ${i}`, email: `user${i}@example.com` });
+  }
+
+  assert.throws(() => serialize(rows), (error) => {
+    assert.ok(error instanceof TypeError, `expected TypeError, got ${error.constructor.name}`);
+    assert.match(error.message, /Cannot export more than 1048576 bytes/);
+    assert.match(error.message, /limit reached at \$\[\d+\]/);
+    return true;
+  });
+});
+
+test('a single oversized string is rejected', () => {
+  assert.throws(
+    () => serialize({ blob: 'x'.repeat(MAX_EXPORT_BYTES + 1) }),
+    /Cannot export more than 1048576 bytes; limit reached at \$\.blob/
+  );
+});
+
+test('a huge array is rejected before its elements are walked', () => {
+  assert.throws(
+    () => serialize(new Array(MAX_EXPORT_BYTES + 10)),
+    /Cannot export more than 1048576 bytes/
+  );
+});
+
+test('a normal page payload stays well inside the limit', () => {
+  const rows = [];
+  for (let i = 0; i < 500; i += 1) {
+    rows.push({ id: i, name: `user number ${i}`, email: `user${i}@example.com`, active: i % 2 === 0 });
+  }
+
+  assert.doesNotThrow(() => serialize(rows));
+  assert.ok(serialize(rows).length < MAX_EXPORT_BYTES);
+});
+
+test('the size budget is per export, not cumulative across renders', async () => {
+  const page = await compileSource(
+    '<weld var="v">return { blob: "y".repeat(600000) };</weld>'
+  );
+
+  // Each render must get a fresh budget; a shared one would fail the second.
+  await assert.doesNotReject(() => page.renderToBuffer());
+  await assert.doesNotReject(() => page.renderToBuffer());
 });
 
 test('line separators and ampersands are escaped', () => {
