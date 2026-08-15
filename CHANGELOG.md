@@ -34,6 +34,8 @@
 
 ### Fixed
 
+- `load()` no longer caches a failed compile. A page that failed to compile stayed broken for the lifetime of the process even after the author fixed the file, and a path that did not exist yet could never be loaded once it appeared. Failures are now evicted, matching `shared()`, so a corrected file loads on the next call without a restart.
+- A page from `load()` now exposes `parts` once compilation finishes, matching a page from `compileFile()`. It reads `undefined` while compilation is still in flight.
 - `page.handler` no longer throws synchronously when handed an unusable response. It touched `response.headersSent` before entering its promise chain, so `handler(req, null)` threw at the call site while every other failure arrived via `next` — and `handler(req, null).catch(...)` crashed instead of rejecting. All failures now report through the same channel.
 
 ### Security

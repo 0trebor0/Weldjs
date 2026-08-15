@@ -181,6 +181,46 @@ test('load reports a compile failure through ready and through next', async () =
   fsMod.unlinkSync(broken);
 });
 
+test('a failed compile is evicted so a corrected file can be loaded', async () => {
+  const target = path.join(os.tmpdir(), `weld-evict-${process.pid}.html`);
+  fsMod.writeFileSync(target, '<p>a</p><weld var="x">return 1;');   // missing </weld>
+
+  const broken = load(target);
+  await assert.rejects(() => broken.ready, /Missing <\/weld>/);
+
+  // Caching the failure would leave the page broken until the process restarted.
+  fsMod.writeFileSync(target, '<p>a</p><weld var="x">return 1;</weld>');
+  await assert.doesNotReject(() => load(target).ready);
+
+  fsMod.unlinkSync(target);
+});
+
+test('a file that does not exist yet can be loaded once it appears', async () => {
+  const target = path.join(os.tmpdir(), `weld-later-${process.pid}.html`);
+  try { fsMod.unlinkSync(target); } catch { /* not there yet */ }
+
+  await assert.rejects(() => load(target).ready, /ENOENT/);
+
+  fsMod.writeFileSync(target, '<p>now exists</p>');
+  await assert.doesNotReject(() => load(target).ready);
+
+  fsMod.unlinkSync(target);
+});
+
+test('a loaded page exposes the same surface as a compiled one', async () => {
+  const target = path.join(__dirname, '..', 'example', 'page.html');
+
+  const loaded = load(target);
+  assert.equal(loaded.parts, undefined, 'parts should be absent until compiled');
+
+  await loaded.ready;
+  const compiled = await compileFile(target);
+
+  const missing = Object.keys(compiled).filter((key) => loaded[key] === undefined);
+  assert.deepEqual(missing, [], `loaded page missing: ${missing.join(', ')}`);
+  assert.ok(Array.isArray(loaded.parts));
+});
+
 test('load validates its argument', () => {
   assert.throws(() => load(42), /non-empty string path/);
   assert.throws(() => load(''), /non-empty string path/);

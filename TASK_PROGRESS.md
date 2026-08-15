@@ -337,6 +337,23 @@ compile failure surfaced through both `ready` and `next`, and argument validatio
 Docs updated: the tutorial and Express sections no longer contain an `async function main`
 wrapper anywhere.
 
+## Thirteenth pass: load() sweep
+
+A 9-check sweep of `load()`. Three defects found, all fixed.
+
+- **A failed compile was cached permanently.** A page that failed to compile stayed broken
+  for the life of the process even after the author corrected the file, and a path that did
+  not exist yet could never load once it appeared. `shared()` already evicted failed
+  entries, so the library had two caches with opposite semantics. `load()` now evicts too.
+- **Missing-file failures stuck** for the same reason; same fix.
+- **`parts` was absent** on a loaded page, so it did not expose the same surface as a
+  compiled one. Added as a getter that reads `undefined` until compilation finishes.
+
+Confirmed working: concurrent `load()` before compilation finishes returns one page, setup
+runs exactly once across repeated loads, `clearLoaded()` forces a fresh compile, `render`
+and `renderToBuffer` both work through a loaded page, and 30 HTTP requests arriving during
+compilation all returned 200 with their own correct data.
+
 ## Assumptions, limitations, remaining risks
 
 - **Serialization is ~35% slower** on large payloads (1.94 ms → 2.61 ms for a 224 KB

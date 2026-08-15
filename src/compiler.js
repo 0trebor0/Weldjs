@@ -304,18 +304,37 @@ function load(filename) {
   if (existing) return existing;
 
   const ready = compileFile(absolute);
+  let compiled = null;
 
-  // A compile failure would otherwise stay invisible until the first request,
-  // where compileFile used to stop the server at boot. Report it immediately and
-  // keep the rejection handled; callers who want to exit can await page.ready.
-  ready.catch((error) => {
-    console.error(`WeldJS: failed to compile ${absolute}`);
-    console.error(error);
-  });
+  ready.then(
+    (result) => {
+      compiled = result;
+    },
+    (error) => {
+      // Evicted so a corrected file can be loaded without restarting the
+      // process, matching shared(), which also drops a failed entry. Caching the
+      // failure would leave a page broken for the lifetime of the process even
+      // after the author fixed it.
+      loaded.delete(absolute);
+
+      // A compile failure would otherwise stay invisible until the first
+      // request, where compileFile used to stop the server at boot. Report it
+      // immediately and keep the rejection handled; callers who want to exit can
+      // await page.ready.
+      console.error(`WeldJS: failed to compile ${absolute}`);
+      console.error(error);
+    }
+  );
 
   const page = Object.freeze({
     filename: absolute,
     ready,
+
+    // Present once compilation finishes, so a loaded page exposes the same
+    // surface as a compiled one.
+    get parts() {
+      return compiled === null ? undefined : compiled.parts;
+    },
 
     handler(request, response, next) {
       const finished = ready.then((compiled) => compiled.handler(request, response));
