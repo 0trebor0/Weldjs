@@ -1,0 +1,16 @@
+{
+  "name": "weldjs",
+  "version": "0.1.0",
+  "description": "Vanilla Node.js prototype: execute <weld> blocks in otherwise untouched HTML.",
+  "main": "src/index.js",
+  "type": "commonjs",
+  "private": true,
+  "scripts": {
+    "test": "node --test",
+    "start": "node example/server.js",
+    "bench": "node benchmark.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

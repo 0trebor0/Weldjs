@@ -1,0 +1,758 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WeldJS Documentation</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #1b1f24;
+    --muted: #5a6472;
+    --rule: #e3e7ec;
+    --accent: #0b62d6;
+    --code-bg: #f6f8fa;
+    --code-fg: #24292f;
+    --warn-bg: #fff8e6;
+    --warn-br: #e0a800;
+    --bad-bg: #fdf0ef;
+    --bad-br: #d1443c;
+    --ok-bg: #eef8f0;
+    --ok-br: #2f9e52;
+    --sidebar: 260px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1216;
+      --fg: #e6edf3;
+      --muted: #9aa7b4;
+      --rule: #262d36;
+      --accent: #6cb0ff;
+      --code-bg: #161b22;
+      --code-fg: #d6dee6;
+      --warn-bg: #2a2416;
+      --warn-br: #b58900;
+      --bad-bg: #2b1a19;
+      --bad-br: #d1443c;
+      --ok-bg: #16261b;
+      --ok-br: #3fb567;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  a { color: var(--accent); }
+  code, pre {
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    font-size: 14px;
+  }
+  code { background: var(--code-bg); padding: .12em .35em; border-radius: 4px; }
+  pre {
+    background: var(--code-bg);
+    color: var(--code-fg);
+    padding: 14px 16px;
+    border-radius: 8px;
+    overflow-x: auto;
+    border: 1px solid var(--rule);
+  }
+  pre code { background: none; padding: 0; }
+
+  nav {
+    position: fixed;
+    top: 0; left: 0; bottom: 0;
+    width: var(--sidebar);
+    padding: 28px 20px 40px;
+    border-right: 1px solid var(--rule);
+    overflow-y: auto;
+    background: var(--bg);
+  }
+  nav h1 { font-size: 15px; margin: 0 0 4px; letter-spacing: .02em; }
+  nav .tag { color: var(--muted); font-size: 12px; margin-bottom: 20px; }
+  nav ul { list-style: none; margin: 0 0 18px; padding: 0; }
+  nav li { margin: 0; }
+  nav a {
+    display: block;
+    padding: 5px 8px;
+    color: var(--fg);
+    text-decoration: none;
+    border-radius: 5px;
+    font-size: 14px;
+  }
+  nav a:hover { background: var(--code-bg); }
+  nav a.active { background: var(--code-bg); color: var(--accent); font-weight: 600; }
+  nav .group {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: .07em;
+    color: var(--muted);
+    margin: 18px 0 6px 8px;
+  }
+  nav .sub a { padding-left: 20px; font-size: 13px; color: var(--muted); }
+
+  main {
+    margin-left: var(--sidebar);
+    padding: 44px 40px 120px;
+    max-width: 860px;
+  }
+  h2 {
+    font-size: 27px;
+    margin: 52px 0 14px;
+    padding-top: 14px;
+    border-top: 1px solid var(--rule);
+  }
+  main > section:first-of-type h2 { margin-top: 0; border-top: none; padding-top: 0; }
+  h3 { font-size: 19px; margin: 30px 0 10px; }
+  h4 { font-size: 15px; margin: 22px 0 8px; }
+  p { margin: 12px 0; }
+  ul, ol { padding-left: 22px; }
+  li { margin: 5px 0; }
+
+  table { border-collapse: collapse; width: 100%; margin: 18px 0; font-size: 14px; }
+  th, td { border: 1px solid var(--rule); padding: 8px 11px; text-align: left; vertical-align: top; }
+  th { background: var(--code-bg); font-weight: 600; }
+
+  .note, .warn, .bad, .ok {
+    border-left: 3px solid var(--rule);
+    background: var(--code-bg);
+    padding: 12px 16px;
+    margin: 18px 0;
+    border-radius: 0 6px 6px 0;
+  }
+  .warn { background: var(--warn-bg); border-left-color: var(--warn-br); }
+  .bad  { background: var(--bad-bg);  border-left-color: var(--bad-br); }
+  .ok   { background: var(--ok-bg);   border-left-color: var(--ok-br); }
+  .note p:first-child, .warn p:first-child, .bad p:first-child, .ok p:first-child { margin-top: 0; }
+  .note p:last-child, .warn p:last-child, .bad p:last-child, .ok p:last-child { margin-bottom: 0; }
+
+  .lede { font-size: 18px; color: var(--muted); margin-bottom: 26px; }
+  .sig {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 15px;
+    font-weight: 600;
+    background: var(--code-bg);
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    padding: 8px 12px;
+    margin: 22px 0 8px;
+  }
+  .muted { color: var(--muted); }
+
+  @media (max-width: 820px) {
+    nav { position: static; width: auto; height: auto; border-right: none; border-bottom: 1px solid var(--rule); }
+    main { margin-left: 0; padding: 28px 20px 80px; }
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <h1>WeldJS</h1>
+  <div class="tag">prototype &middot; v0.1.0</div>
+
+  <ul>
+    <li><a href="#overview">Overview</a></li>
+    <li><a href="#quickstart">Quick start</a></li>
+  </ul>
+
+  <div class="group">Tutorial</div>
+  <ul>
+    <li><a href="#tutorial">Build a profile page</a></li>
+    <li class="sub"><a href="#t-page">1. The page</a></li>
+    <li class="sub"><a href="#t-serve">2. Serve it</a></li>
+    <li class="sub"><a href="#t-setup">3. Setup block</a></li>
+    <li class="sub"><a href="#t-request">4. Per-request data</a></li>
+    <li class="sub"><a href="#t-client">5. Use it client-side</a></li>
+    <li class="sub"><a href="#t-full">Finished page</a></li>
+  </ul>
+
+  <div class="group">Guide</div>
+  <ul>
+    <li><a href="#blocks">The two block types</a></li>
+    <li><a href="#reqres">Accessing req and res</a></li>
+    <li><a href="#lifecycle">Compile and render</a></li>
+    <li><a href="#isolation">Request isolation</a></li>
+    <li><a href="#exporting">Exporting data</a></li>
+    <li><a href="#names">Variable names</a></li>
+    <li><a href="#express">Using Express</a></li>
+  </ul>
+
+  <div class="group">Reference</div>
+  <ul>
+    <li><a href="#api">API</a></li>
+    <li><a href="#errors">Errors</a></li>
+  </ul>
+
+  <div class="group">Other</div>
+  <ul>
+    <li><a href="#security">Security</a></li>
+    <li><a href="#limitations">Limitations</a></li>
+  </ul>
+</nav>
+
+<main>
+
+<section id="overview">
+  <h2>Overview</h2>
+  <p class="lede">WeldJS runs server-side JavaScript inside otherwise untouched HTML files.</p>
+
+  <p>An HTML file passes through byte for byte, except for <code>&lt;weld&gt;</code> blocks.
+  The page is compiled once at startup; each request re-runs only the blocks that produce data.
+  There is no HTML parser involved at any point — non-<code>&lt;weld&gt;</code> bytes are never inspected.</p>
+
+  <div class="note">
+    <p><strong>The one thing to know first.</strong> There are two kinds of block and they behave
+    completely differently:</p>
+<pre><code>&lt;weld&gt;              runs ONCE at load, shared by every request
+&lt;weld var="x"&gt;      runs on EVERY request, private to that request</code></pre>
+    <p>Put shared setup in the first, anything derived from the request in the second. Mixing them
+    up lets one user's data reach another — see <a href="#isolation">Request isolation</a>.</p>
+  </div>
+
+  <p>Requires Node.js 20 or newer. No dependencies.</p>
+</section>
+
+<section id="quickstart">
+  <h2>Quick start</h2>
+<pre><code>npm test     # run the test suite
+npm start    # serve example/page.html on 127.0.0.1:3000
+npm run bench</code></pre>
+
+  <p>Minimal page:</p>
+<pre><code>&lt;weld&gt;
+const db = require('./db.js');
+&lt;/weld&gt;
+
+&lt;h1&gt;Users&lt;/h1&gt;
+
+&lt;weld var="users"&gt;
+return await db.users();
+&lt;/weld&gt;
+
+&lt;script&gt;
+console.log(users);
+&lt;/script&gt;</code></pre>
+</section>
+
+<section id="tutorial">
+  <h2>Tutorial: a profile page</h2>
+  <p>You will build a page that reads a user from SQLite and renders it, served by Express.
+  Every code block is complete — nothing is elided.</p>
+
+  <h3 id="t-page">1. The page</h3>
+  <p>Create <code>views/profile.html</code>:</p>
+<pre><code>&lt;!doctype html&gt;
+&lt;html&gt;
+&lt;head&gt;&lt;meta charset="utf-8"&gt;&lt;title&gt;Profile&lt;/title&gt;&lt;/head&gt;
+&lt;body&gt;
+  &lt;h1&gt;Profile&lt;/h1&gt;
+  &lt;pre id="out"&gt;&lt;/pre&gt;
+&lt;/body&gt;
+&lt;/html&gt;</code></pre>
+  <p>No <code>&lt;weld&gt;</code> blocks yet, so this file passes through unchanged.</p>
+
+  <h3 id="t-serve">2. Serve it</h3>
+<pre><code>'use strict';
+
+const path = require('node:path');
+const express = require('express');
+const { compileFile } = require('./src');
+
+async function main() {
+  // Compiled once. This is where &lt;weld&gt; setup blocks run.
+  const page = await compileFile(path.join(__dirname, 'views', 'profile.html'));
+
+  const app = express();
+
+  app.get('/profile', async (req, res, next) =&gt; {
+    try {
+      res.type('html');
+      await page.render(req, res);
+      res.end();
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.listen(3000, () =&gt; console.log('http://127.0.0.1:3000/profile'));
+}
+
+main().catch((err) =&gt; {
+  console.error(err);
+  process.exitCode = 1;
+});</code></pre>
+
+  <div class="warn">
+    <p><strong>Compile once, outside the route.</strong> Calling <code>compileFile</code> inside the
+    handler recompiles the file and re-runs your setup on every request, defeating the entire design.</p>
+  </div>
+
+  <h3 id="t-setup">3. Add a setup block</h3>
+  <p>Add this just inside <code>&lt;body&gt;</code>:</p>
+<pre><code>&lt;weld&gt;
+const { DatabaseSync } = require('node:sqlite');
+
+const db = await shared('app-db', async () =&gt; {
+  const connection = new DatabaseSync(':memory:');
+  connection.exec(`
+    CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);
+    INSERT INTO users (name) VALUES ('Rob'), ('Sarah');
+  `);
+  return connection;
+});
+
+const findUser = db.prepare('SELECT id, name FROM users WHERE id = ?');
+&lt;/weld&gt;</code></pre>
+
+  <ul>
+    <li><code>require</code> works here and resolves relative to the <strong>HTML file</strong>, not your CWD.</li>
+    <li><code>shared(key, factory)</code> caches a resource across pages. The factory runs once;
+      concurrent callers receive the same promise.</li>
+    <li><code>db.prepare(...)</code> compiles the SQL once. The <code>?</code> is a placeholder that
+      holds no data — preparing it here does <strong>not</strong> bind it to a particular id.</li>
+    <li>Top-level <code>await</code> is allowed in setup blocks. That is why <code>compileFile</code> is async.</li>
+  </ul>
+
+  <h3 id="t-request">4. Add per-request data</h3>
+  <p>Add this after the <code>&lt;h1&gt;</code>:</p>
+<pre><code>&lt;weld var="profile"&gt;
+const id = Number(request.query.id);
+
+if (!Number.isInteger(id) || id &lt; 1) {
+  return { error: 'bad id' };
+}
+
+const row = findUser.get(id);
+return row ? { id: row.id, name: row.name } : { error: 'not found' };
+&lt;/weld&gt;</code></pre>
+
+  <p>This runs on every request. <code>request</code> is whatever you passed to
+  <code>page.render</code> — with Express that is <code>req</code>, so <code>request.query</code>,
+  <code>request.params</code>, and <code>request.body</code> all work.</p>
+
+  <p><code>findUser</code> is shared, but <code>.get(id)</code> is called with this request's id and
+  returns a fresh row. <code>id</code> and <code>row</code> are declared <strong>inside</strong> this
+  block, which is what keeps them private to one request.</p>
+
+  <h3 id="t-client">5. Use it client-side</h3>
+  <p>The block is replaced at render time by a script tag, so <code>profile</code> is a normal
+  variable for anything after it:</p>
+<pre><code>&lt;script&gt;
+  document.querySelector('#out').textContent = JSON.stringify(profile, null, 2);
+&lt;/script&gt;</code></pre>
+
+  <p><code>GET /profile?id=1</code> and <code>?id=2</code> hit the same cached buffers and the same
+  handler, differing in one line:</p>
+<pre><code>&lt;script&gt;const profile={"id":1,"name":"Rob"};&lt;/script&gt;
+&lt;script&gt;const profile={"id":2,"name":"Sarah"};&lt;/script&gt;</code></pre>
+
+  <h3 id="t-full">Finished page</h3>
+<pre><code>&lt;!doctype html&gt;
+&lt;html&gt;
+&lt;head&gt;&lt;meta charset="utf-8"&gt;&lt;title&gt;Profile&lt;/title&gt;&lt;/head&gt;
+&lt;body&gt;
+
+&lt;weld&gt;
+const { DatabaseSync } = require('node:sqlite');
+
+const db = await shared('app-db', async () =&gt; {
+  const connection = new DatabaseSync(':memory:');
+  connection.exec(`
+    CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);
+    INSERT INTO users (name) VALUES ('Rob'), ('Sarah');
+  `);
+  return connection;
+});
+
+const findUser = db.prepare('SELECT id, name FROM users WHERE id = ?');
+&lt;/weld&gt;
+
+&lt;h1&gt;Profile&lt;/h1&gt;
+
+&lt;weld var="profile"&gt;
+const id = Number(request.query.id);
+
+if (!Number.isInteger(id) || id &lt; 1) {
+  return { error: 'bad id' };
+}
+
+const row = findUser.get(id);
+return row ? { id: row.id, name: row.name } : { error: 'not found' };
+&lt;/weld&gt;
+
+&lt;pre id="out"&gt;&lt;/pre&gt;
+
+&lt;script&gt;
+  document.querySelector('#out').textContent = JSON.stringify(profile, null, 2);
+&lt;/script&gt;
+
+&lt;/body&gt;
+&lt;/html&gt;</code></pre>
+</section>
+
+<section id="blocks">
+  <h2>The two block types</h2>
+  <p>This is the whole model. Everything else follows from it.</p>
+
+  <table>
+    <thead>
+      <tr><th>Block</th><th>Runs</th><th>Scope</th><th>Use for</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>&lt;weld&gt;</code></td>
+        <td><strong>Once</strong>, at compile</td>
+        <td>Shared by every request, for the process lifetime</td>
+        <td>modules, connections, prepared statements</td>
+      </tr>
+      <tr>
+        <td><code>&lt;weld var="x"&gt;</code></td>
+        <td><strong>Every request</strong></td>
+        <td>Locals are private to that invocation</td>
+        <td>anything derived from the request</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>Setup blocks are concatenated in document order into a single page closure, so a
+  <code>const</code> declared in the first is visible in the second and in every handler.</p>
+
+  <p>A <code>var</code> block is compiled into
+  <code>async function (request, response) { …your code… }</code>, so it must
+  <code>return</code> a value, and it may <code>await</code>.</p>
+</section>
+
+<section id="reqres">
+  <h2>Accessing req and res</h2>
+
+  <div class="warn">
+    <p><strong>A plain <code>&lt;weld&gt;</code> block cannot see them at all.</strong> It runs once at
+    compile time, before any request exists. Referencing <code>request</code> there throws
+    <code>ReferenceError: request is not defined</code> — and because setup runs during
+    <code>compileFile</code>, that failure stops your server at boot.</p>
+  </div>
+
+  <p>They are available only inside <code>&lt;weld var="…"&gt;</code> blocks, where they are the two
+  handler parameters, named <code>request</code> and <code>response</code>:</p>
+
+<pre><code>&lt;weld var="profile"&gt;
+const id = request.query.id;      // Express req
+response.setHeader(...);          // Express res — see caveats below
+return { id };
+&lt;/weld&gt;</code></pre>
+
+  <p>Whatever you pass to <code>page.render(req, res)</code> is what these names refer to, so with
+  Express they are the full Express <code>req</code>/<code>res</code>, including
+  <code>request.query</code>, <code>request.params</code>, and <code>request.body</code>.</p>
+
+  <h3>Two caveats on <code>response</code></h3>
+
+  <p><strong>It is <code>null</code> under <code>renderToBuffer()</code></strong> unless you pass one
+  explicitly, since that signature is <code>renderToBuffer(request, response = null)</code>. A handler
+  that touches <code>response</code> unconditionally will throw there.</p>
+
+  <p><strong>Headers usually cannot be set from a block.</strong> <code>render()</code> streams, and
+  the leading static HTML is written <em>before</em> the first handler runs — so by the time your code
+  executes, headers are already sent:</p>
+
+  <table>
+    <thead><tr><th>Page shape</th><th><code>response.setHeader()</code> in the block</th></tr></thead>
+    <tbody>
+      <tr><td><code>&lt;weld var&gt;</code> first, no HTML before it</td><td>works — nothing written yet</td></tr>
+      <tr><td>any HTML before the block</td><td><code>ERR_HTTP_HEADERS_SENT</code></td></tr>
+    </tbody>
+  </table>
+
+  <p>Since that depends on where the block sits in the file, do status and header work in the route
+  instead, where it is unconditional:</p>
+
+<pre><code>app.get('/profile', async (req, res, next) =&gt; {
+  try {
+    res.type('html');
+    res.setHeader('cache-control', 'no-store');   // here, not in a block
+    await page.render(req, res);
+    res.end();
+  } catch (err) {
+    next(err);
+  }
+});</code></pre>
+
+  <p>Treat <code>response</code> inside a block as read-mostly. If you need per-request setup shared by
+  several blocks, compute it in the first <code>var</code> block and return it — do not stash it in
+  setup scope (<a href="#isolation">why</a>).</p>
+</section>
+
+<section id="lifecycle">
+  <h2>Compile and render</h2>
+
+  <h3>What compilation produces</h3>
+  <p><code>compileFile</code> reads the file once and returns a frozen page object holding:</p>
+  <ul>
+    <li><strong>Static HTML as buffers.</strong> Runs of HTML separated only by a setup block are
+      joined once at compile time, so rendering writes one buffer per run.</li>
+    <li><strong>One handler function per <code>var</code> block.</strong></li>
+  </ul>
+  <p>Nothing is re-scanned or re-parsed per request.</p>
+
+  <h3>What a request does</h3>
+  <p>For a page shaped <code>HTML &lt;weld&gt; HTML &lt;weld var="x"&gt; HTML</code>:</p>
+  <ol>
+    <li>Write the merged buffer for the leading HTML.</li>
+    <li>Call the handler for <code>x</code>.</li>
+    <li>Serialize the result and write <code>&lt;script&gt;const x=…;&lt;/script&gt;</code>.</li>
+    <li>Write the trailing buffer.</li>
+  </ol>
+  <p>Only steps 2 and 3 do per-request work. Steps 1 and 4 write buffers computed at load time,
+  which is why a 70 KB page renders in roughly 30 microseconds.</p>
+</section>
+
+<section id="isolation">
+  <h2>Request isolation</h2>
+
+  <div class="warn">
+    <p><strong>The rule.</strong> Anything derived from <code>request</code> lives in a
+    <code>var</code> block. Setup scope is only for things identical for every user.</p>
+  </div>
+
+  <p>Setup scope is one closure shared by every request for the process lifetime. Writing request
+  data into it leaks across users. This is invisible in single-user testing — you need concurrency
+  <em>and</em> an <code>await</code> to see it.</p>
+
+  <div class="bad">
+    <p><strong>Wrong.</strong> <code>currentUser</code> is shared by every request.</p>
+<pre><code>&lt;weld&gt;
+let currentUser = null;
+&lt;/weld&gt;
+&lt;weld var="profile"&gt;
+currentUser = request.query.user;
+const row = await lookup(currentUser);   // yields here
+return { name: currentUser };            // may now be another user's value
+&lt;/weld&gt;</code></pre>
+    <p>Two concurrent requests, one asking for <code>alice</code> and one for <code>bob</code>:</p>
+<pre><code>req A (asked for alice): {"name":"bob"}
+req B (asked for bob):   {"name":"bob"}</code></pre>
+    <p>Alice received Bob's data. A writes <code>currentUser</code>, then awaits; B overwrites it
+    during that await; A resumes and reads B's value.</p>
+  </div>
+
+  <div class="ok">
+    <p><strong>Right.</strong> The value is a local, private to this invocation.</p>
+<pre><code>&lt;weld var="profile"&gt;
+const currentUser = request.query.user;
+const row = await lookup(currentUser);
+return { name: currentUser };
+&lt;/weld&gt;</code></pre>
+  </div>
+
+  <p>Interleaving only happens at <code>await</code> points. A shared object touched synchronously is
+  safe — this is why a shared prepared statement is fine, since <code>node:sqlite</code>'s
+  <code>DatabaseSync</code> never yields mid-query. A shared <em>variable</em> held across an
+  <code>await</code> is not. <code>shared()</code> is safe for the same reason: a connection handle
+  is immutable state that is genuinely identical for all users.</p>
+</section>
+
+<section id="exporting">
+  <h2>Exporting data</h2>
+  <p>A <code>var</code> block's return value is serialized into a <code>&lt;script&gt;</code> tag.
+  It must be JSON-compatible: strings, finite numbers, booleans, <code>null</code>, arrays, and
+  plain objects. <code>Object.create(null)</code> is accepted.</p>
+
+  <p>Everything else is rejected with a <code>TypeError</code> naming the path:</p>
+  <table>
+    <thead><tr><th>Rejected</th><th>Why</th></tr></thead>
+    <tbody>
+      <tr><td><code>undefined</code>, functions, symbols, bigints</td><td>no JSON representation</td></tr>
+      <tr><td><code>NaN</code>, <code>Infinity</code></td><td>no JSON representation</td></tr>
+      <tr><td>circular references</td><td>cannot be serialized</td></tr>
+      <tr><td><code>Date</code>, <code>Map</code>, <code>Set</code>, class instances</td><td>non-plain objects; return <code>date.toISOString()</code> instead</td></tr>
+      <tr><td>a <code>__proto__</code> key</td><td>would set the prototype of the client object</td></tr>
+      <tr><td>nesting deeper than 64 levels</td><td>bounded to prevent stack exhaustion</td></tr>
+    </tbody>
+  </table>
+
+  <p>See <a href="#security">Security</a> for why these are enforced rather than conveniences.</p>
+</section>
+
+<section id="names">
+  <h2>Variable names</h2>
+  <p>The <code>var</code> attribute becomes <code>const &lt;name&gt;</code> in the emitted script, so
+  it must be a valid binding identifier and unique across the page. Both are enforced at compile
+  time — a page that would emit <code>const x</code> twice, or <code>const class</code>, fails to
+  compile rather than silently breaking every script in the browser.</p>
+</section>
+
+<section id="express">
+  <h2>Using Express</h2>
+  <p><code>render()</code> needs only <code>response.write(chunk)</code> returning a boolean and a
+  <code>'drain'</code> event. Express's <code>res</code> is an <code>http.ServerResponse</code> and
+  does not replace either, so it works unchanged.</p>
+
+<pre><code>app.use('/docs', express.static(path.join(__dirname, 'docs')));
+
+app.get('/profile', async (req, res, next) =&gt; {
+  try {
+    res.type('html');
+    await page.render(req, res);
+    res.end();
+  } catch (err) {
+    next(err);
+  }
+});</code></pre>
+
+  <div class="warn">
+    <p><strong>Two version-dependent gotchas.</strong> Express 5 auto-forwards rejected promises from
+    async handlers; <strong>Express 4 does not</strong> — an async handler that throws without an
+    explicit <code>try/catch … next(err)</code> leaves the request hanging until timeout. The snippet
+    above is safe on both.</p>
+    <p>Because <code>render()</code> streams, a handler that throws after the first write has already
+    sent bytes. Express's error handler will then attempt <code>res.status(500)</code> and produce
+    <code>ERR_HTTP_HEADERS_SENT</code> on top of a truncated page. Use
+    <code>renderToBuffer()</code> if you need failures to stay atomic.</p>
+  </div>
+</section>
+
+<section id="api">
+  <h2>API</h2>
+
+  <div class="sig">await compileFile(filename)</div>
+  <p>Reads and compiles an HTML file. Runs all setup blocks once. Returns a frozen page object.
+  <span class="muted">The path is resolved against <code>process.cwd()</code>, so pass an absolute
+  path built from <code>__dirname</code>.</span></p>
+
+  <div class="sig">await compileSource(input, options?)</div>
+  <p>Same, from a string or Buffer. <code>options.filename</code> sets what <code>require</code>,
+  <code>__filename</code>, and <code>__dirname</code> resolve against inside the page.</p>
+
+  <div class="sig">page.render(request, response)</div>
+  <p>Streams the page, writing static buffers directly and awaiting <code>'drain'</code> on
+  backpressure. <code>request</code> is passed to every handler.</p>
+
+  <div class="sig">await page.renderToBuffer(request?, response?)</div>
+  <p>Renders to a single Buffer instead of streaming. Slower for large pages, but a handler failure
+  leaves nothing partially sent.</p>
+
+  <div class="sig">page.filename &middot; page.source &middot; page.parts</div>
+  <p>The resolved path, the original source Buffer, and the compiled part list
+  (<code>{ type: 'html', buffer }</code> and <code>{ type: 'request', varName, handler }</code>).</p>
+
+  <div class="sig">await shared(key, factory)</div>
+  <p>Process-wide resource cache. The factory runs once per key; concurrent callers receive the same
+  promise, and a rejected factory is not cached. Available inside setup blocks.</p>
+
+  <div class="sig">clearShared()</div>
+  <p>Empties the cache. Intended for tests.</p>
+
+  <div class="sig">serialize(value) &middot; assertSerializable(value) &middot; MAX_DEPTH</div>
+  <p>The export serializer, its validator, and the depth limit (64).</p>
+
+  <div class="sig">scan(input)</div>
+  <p>The low-level scanner. Returns <code>{ source, parts }</code> with byte offsets.</p>
+</section>
+
+<section id="errors">
+  <h2>Errors</h2>
+  <p>Scan-time problems throw <code>WeldSyntaxError</code> (a <code>SyntaxError</code>) carrying a
+  byte <code>offset</code>. Because compilation happens at startup, a malformed page stops the server
+  at boot instead of failing under traffic.</p>
+  <p>Export problems throw <code>TypeError</code> at render time, from the request that caused them.</p>
+</section>
+
+<section id="security">
+  <h2>Security</h2>
+  <p><code>&lt;weld&gt;</code> is trusted server application code with normal Node.js privileges. It is
+  <strong>not</strong> a sandbox.</p>
+
+  <div class="bad">
+    <p><strong>An HTML file is executable code.</strong> Compiling one is equivalent to
+    <code>require</code>-ing it. Never call <code>compileFile</code> or <code>compileSource</code> on
+    a file that a user supplied, uploaded, or can edit — a <code>&lt;weld&gt;</code> block in it runs
+    with full server privileges. Templates belong in your repository, not in a database or an
+    uploads directory.</p>
+  </div>
+
+  <p>Request data, by contrast, <strong>cannot</strong> reach the compiler. Compilation happens once at
+  startup from the file's bytes alone, before any request exists. A value returned from a handler is
+  serialized as data and never evaluated server-side, and a string containing
+  <code>&lt;/weld&gt;</code> is escaped rather than reopening a block:</p>
+
+<pre><code>request.query.payload = 'require("fs"); doSomething();'
+emitted: &lt;script&gt;const v="require(\"fs\"); doSomething();";&lt;/script&gt;   // inert data</code></pre>
+
+  <div class="warn">
+    <p><strong>One footgun to avoid.</strong> <code>require</code> is in scope inside
+    <code>var</code> blocks too, so <code>require(request.query.mod)</code> loads an
+    attacker-chosen module on every request. Never pass request data to <code>require</code>,
+    <code>fs</code> paths, or child-process arguments.</p>
+  </div>
+
+  <p>The boundary is the <em>export</em> path. Only values returned from
+  <code>&lt;weld var="…"&gt;</code> reach the client, and they are:</p>
+  <ul>
+    <li><strong>Validated and copied in a single walk</strong>, reading each property exactly once, so
+      the value that is checked is necessarily the value written. A second pass would let an accessor
+      or proxy return one value to the validator and another to the serializer.</li>
+    <li><strong>Escaped</strong> for <code>&amp;</code>, <code>&lt;</code>, <code>&gt;</code>,
+      U+2028 and U+2029, so a string cannot terminate the generated
+      <code>&lt;script&gt;</code>.</li>
+    <li><strong>Rejected</strong> if they carry a <code>__proto__</code> key, which would set the
+      prototype of the client-side object rather than defining a property.</li>
+    <li><strong>Depth-bounded</strong> at 64 levels, so deep nesting fails cleanly instead of
+      exhausting the stack.</li>
+  </ul>
+
+  <p>Use placeholders for SQL. <code>db.prepare('… WHERE id = ?')</code> binds the value as data;
+  interpolating it into the SQL string is both slower and an injection hole.</p>
+
+  <p>The largest remaining hazard is not in the serializer but in scope discipline — see
+  <a href="#isolation">Request isolation</a>.</p>
+</section>
+
+<section id="limitations">
+  <h2>Limitations</h2>
+  <ul>
+    <li>Literal <code>&lt;weld&gt;</code> and <code>&lt;/weld&gt;</code> are reserved sequences
+      anywhere in the file, including inside comments, scripts, and attribute values.</li>
+    <li>Nested <code>&lt;weld&gt;</code> blocks are rejected.</li>
+    <li><code>var</code> is the only supported attribute.</li>
+    <li>No router, hot reload, body parser, sessions, or database abstraction.</li>
+    <li><code>render()</code> streams, so a handler that throws after the first write leaves a
+      truncated page under an already-sent 200. <code>renderToBuffer()</code> does not.</li>
+    <li>There is no size cap on an exported value; only depth is bounded.</li>
+  </ul>
+</section>
+
+</main>
+
+<script>
+  // Highlight the nav entry for the section currently in view.
+  var links = Array.prototype.slice.call(document.querySelectorAll('nav a'));
+  var targets = links
+    .map(function (a) {
+      var el = document.getElementById(a.getAttribute('href').slice(1));
+      return el ? { link: a, el: el } : null;
+    })
+    .filter(Boolean);
+
+  function sync() {
+    var top = window.scrollY + 90;
+    var current = null;
+    for (var i = 0; i < targets.length; i += 1) {
+      if (targets[i].el.offsetTop <= top) current = targets[i];
+    }
+    links.forEach(function (a) { a.classList.remove('active'); });
+    if (current) current.link.classList.add('active');
+  }
+
+  window.addEventListener('scroll', sync, { passive: true });
+  window.addEventListener('resize', sync);
+  // This first call runs before layout has settled, so sync again once it has.
+  window.addEventListener('load', sync);
+  requestAnimationFrame(sync);
+  sync();
+</script>
+
+</body>
+</html>
