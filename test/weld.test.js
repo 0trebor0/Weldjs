@@ -3,6 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const vm = require('node:vm');
+const http = require('node:http');
 const { EventEmitter } = require('node:events');
 const { compileSource, compileFile, scan, serialize, clearShared, MAX_DEPTH, MAX_EXPORT_BYTES } = require('../src');
 
@@ -174,6 +175,60 @@ test('handler forwards failures to next with nothing written', async () => {
   assert.match(error.message, /block failed/);
   assert.equal(response.chunks.length, 0, 'wrote bytes before failing');
   assert.equal(response.ended, false, 'ended the response on failure');
+});
+
+test('handler reports a bad response through next, never by throwing', async () => {
+  const page = await compileSource('<p>a</p>');
+
+  for (const bad of [null, undefined, {}, 42]) {
+    let threw = null;
+    const error = await new Promise((resolve) => {
+      try {
+        page.handler(Object.create(null), bad, resolve);
+      } catch (e) {
+        threw = e;
+        resolve(null);
+      }
+    });
+
+    assert.equal(threw, null, `handler threw synchronously for ${String(bad)}`);
+    assert.match(error.message, /requires a response with a write\(\) method/);
+  }
+});
+
+test('handler returns a rejected promise, not a throw, when next is absent', async () => {
+  const page = await compileSource('<p>a</p>');
+
+  const result = page.handler(Object.create(null), null);
+  assert.ok(result && typeof result.catch === 'function', 'did not return a promise');
+  await assert.rejects(() => result, /requires a response with a write\(\) method/);
+});
+
+test('handler serves a complete response over real HTTP', async () => {
+  const page = await compileSource('<!doctype html><p>hi</p><weld var="v">return { a: 1 };</weld>');
+  const server = http.createServer((req, res) => page.handler(req, res, () => {
+    res.statusCode = 500;
+    res.end();
+  }));
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+
+  const received = await new Promise((resolve) => {
+    http.get({ host: '127.0.0.1', port, path: '/' }, (res) => {
+      let body = '';
+      res.on('data', (chunk) => { body += chunk; });
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body }));
+    });
+  });
+
+  server.close();
+
+  assert.equal(received.status, 200);
+  assert.equal(received.headers['content-type'], 'text/html; charset=utf-8');
+  assert.equal(received.headers['content-length'], String(Buffer.byteLength(received.body)));
+  assert.equal(received.headers['transfer-encoding'], undefined, 'fell back to chunked encoding');
+  assert.match(received.body, /const v=\{"a":1\};/);
 });
 
 test('handler returns a promise when called without next', async () => {

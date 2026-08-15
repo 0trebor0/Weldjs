@@ -231,17 +231,27 @@ async function compileSource(input, options = {}) {
   // it returns the promise instead, so the failure is still the caller's to
   // handle rather than being swallowed.
   function handler(request, response, next) {
-    if (
-      !response.headersSent &&
-      typeof response.getHeader === 'function' &&
-      response.getHeader('content-type') === undefined
-    ) {
-      response.setHeader('content-type', 'text/html; charset=utf-8');
-    }
+    // Everything runs inside the promise chain, including the header default, so
+    // that a bad response reports through the same channel as every other
+    // failure. Touching response directly here would throw synchronously from
+    // the call site while all other errors arrived via next.
+    const finished = Promise.resolve()
+      .then(() => {
+        if (
+          response !== null &&
+          typeof response === 'object' &&
+          !response.headersSent &&
+          typeof response.getHeader === 'function' &&
+          response.getHeader('content-type') === undefined
+        ) {
+          response.setHeader('content-type', 'text/html; charset=utf-8');
+        }
 
-    const finished = render(request, response).then(() => {
-      response.end();
-    });
+        return render(request, response);
+      })
+      .then(() => {
+        response.end();
+      });
 
     if (typeof next === 'function') {
       finished.catch(next);

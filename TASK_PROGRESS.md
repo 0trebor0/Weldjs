@@ -290,6 +290,27 @@ Three stale Express snippets in `docs/index.html` still showed the old
 `await page.render(req, res)` and no `res.end()` outside a comment describing their
 absence.
 
+## Eleventh pass: handler sweep
+
+An 11-check sweep of `page.handler`, including four over real HTTP. One defect found:
+
+- **Inconsistent error channel.** `handler` read `response.headersSent` before entering its
+  promise chain, so an unusable response threw synchronously from the call site while every
+  other failure arrived via `next`. `handler(req, null).catch(...)` therefore crashed rather
+  than rejecting. Express masks this by catching sync throws, but the contract was
+  incoherent. The header default now runs inside the chain, so all failures report the same
+  way. Confirmed by re-running the sweep: "no sync throw".
+
+Confirmed working: the response is ended exactly once on success and never on failure; a
+throwing `end()` reaches `next` rather than vanishing; content-type is not set once headers
+are sent; a response without `getHeader` still works; HEAD returns correct headers with an
+empty body; 20 concurrent HTTP requests each received their own data; and a failing block
+produced a real 500 with no page content leaked.
+
+Tests promoted into the suite: error-channel consistency across `null`/`undefined`/`{}`/`42`,
+the rejected-promise contract without `next`, and a full real-HTTP request asserting status,
+content-type, Content-Length matching the body, and no chunked encoding.
+
 ## Assumptions, limitations, remaining risks
 
 - **Serialization is ~35% slower** on large payloads (1.94 ms → 2.61 ms for a 224 KB

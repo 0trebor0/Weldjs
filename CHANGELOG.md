@@ -21,6 +21,10 @@
   It renders, ends the response, and forwards any failure to `next`, which reaches your error middleware with nothing written. It sets `content-type: text/html; charset=utf-8` only if nothing has set one already, so setting your own headers first still works. Called without `next` — a vanilla server — it returns the promise instead of swallowing the failure.
 - `example/express-server.js` — a complete Express example: compile-at-boot, static docs mounted at `/docs`, `setHeader` rather than `writeHead` so `Content-Length` is set, and an error handler that works on both Express 4 and 5. Express is not added as a dependency; install it yourself to run the example.
 
+### Fixed
+
+- `page.handler` no longer throws synchronously when handed an unusable response. It touched `response.headersSent` before entering its promise chain, so `handler(req, null)` threw at the call site while every other failure arrived via `next` — and `handler(req, null).catch(...)` crashed instead of rejecting. All failures now report through the same channel.
+
 ### Security
 
 - Source input is now validated explicitly instead of being handed to `Buffer.from`, which accepts an array and silently reinterprets its elements as bytes. `scan([60,112,62])` and `compileSource([60,112,62])` previously compiled nonsense; both now throw. `compileSource()` also validates its options object and `options.filename`, `compileFile()` validates its path, and `render()` validates that the response can be written to — each with an error naming the argument rather than surfacing as an internal `paths[0]` failure.
