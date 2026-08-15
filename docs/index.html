@@ -177,6 +177,10 @@
     <li><a href="#isolation">Request isolation</a></li>
     <li><a href="#exporting">Exporting data</a></li>
     <li><a href="#names">Variable names</a></li>
+    <li><a href="#includes">Includes and layouts</a></li>
+    <li><a href="#routing">File-based routing</a></li>
+    <li><a href="#csp">Content-Security-Policy</a></li>
+    <li><a href="#hotreload">Hot reload</a></li>
     <li><a href="#express">Using Express</a></li>
   </ul>
 
@@ -600,6 +604,117 @@ return { name: currentUser };
   compile rather than silently breaking every script in the browser.</p>
 </section>
 
+<section id="includes">
+  <h2>Includes and layouts</h2>
+  <p>A shared header, nav or footer lives in its own file and is pulled in with
+  <code>&lt;weld src="..."&gt;</code>:</p>
+
+<pre><code>&lt;!doctype html&gt;
+&lt;weld src="../partials/header.html"&gt;&lt;/weld&gt;
+
+&lt;main&gt;
+  &lt;weld var="page"&gt;return { name: 'about' };&lt;/weld&gt;
+&lt;/main&gt;
+
+&lt;weld src="../partials/footer.html"&gt;&lt;/weld&gt;</code></pre>
+
+  <p>Paths resolve relative to the file doing the including, and includes may nest. The tag must be
+  empty and cannot also carry <code>var</code>.</p>
+
+  <div class="ok">
+    <p><strong>Includes cost nothing per request.</strong> They are expanded once at compile time,
+    before the page is scanned, and the included markup is merged into the surrounding static runs.
+    A page with two partials still writes the same number of buffers as one without.</p>
+  </div>
+
+  <p>Because expansion happens before scanning, an included file behaves exactly as if its contents
+  were pasted in: its <code>&lt;weld&gt;</code> setup blocks join the page's setup, its
+  <code>&lt;weld var&gt;</code> blocks become the page's request blocks, and a variable name used by
+  both the partial and the page is caught as a duplicate at compile time.</p>
+
+  <p>A cycle is refused rather than followed, and nesting is capped at 16 levels.
+  <code>page.dependencies</code> lists the files pulled in, which is what
+  <a href="#hotreload">watch</a> uses.</p>
+</section>
+
+<section id="routing">
+  <h2>File-based routing</h2>
+  <p>Mount a directory and every <code>.html</code> file in it becomes a route:</p>
+
+<pre><code>app.use(router(path.join(__dirname, 'pages')));</code></pre>
+
+  <table>
+    <thead><tr><th>File</th><th>Route</th></tr></thead>
+    <tbody>
+      <tr><td><code>pages/index.html</code></td><td><code>/</code></td></tr>
+      <tr><td><code>pages/about.html</code></td><td><code>/about</code></td></tr>
+      <tr><td><code>pages/blog/index.html</code></td><td><code>/blog</code></td></tr>
+      <tr><td><code>pages/blog/[slug].html</code></td><td><code>/blog/:slug</code></td></tr>
+    </tbody>
+  </table>
+
+  <p>A <code>[name]</code> segment becomes <code>request.params.name</code>, decoded. Dotfiles are
+  skipped, symlinked directories are not followed, and non-GET methods pass straight through.</p>
+
+  <div class="ok">
+    <p><strong>The route table is built once at startup and never consulted against the filesystem
+    at request time</strong>, so a traversal attempt has nothing to match. <code>/blog/%2e%2e</code>,
+    <code>/%2e%2e/%2e%2e/etc/passwd</code>, a null byte and malformed percent-encoding are all
+    rejected outright. Static routes are a single Map lookup; parameterised ones are compared only
+    against candidates with the same segment count.</p>
+  </div>
+</section>
+
+<section id="csp">
+  <h2>Content-Security-Policy</h2>
+  <p>The emitted <code>&lt;script&gt;</code> is inline, which a strict policy such as
+  <code>script-src 'self'</code> blocks outright — the page renders and the data silently never
+  arrives. Set a nonce on <code>res.locals</code> and it is applied automatically:</p>
+
+<pre><code>app.use((req, res, next) =&gt; {
+  res.locals.cspNonce = crypto.randomBytes(16).toString('base64');
+  res.setHeader(
+    'content-security-policy',
+    `default-src 'self'; script-src 'self' 'nonce-${res.locals.cspNonce}'`
+  );
+  next();
+});</code></pre>
+
+  <p>Both <code>res.locals.cspNonce</code> and <code>res.locals.nonce</code> are recognised, so the
+  common helmet setups need no configuration. The emitted tag becomes
+  <code>&lt;script nonce="..."&gt;</code>.</p>
+
+  <div class="warn">
+    <p>A nonce that is not base64-shaped, or is shorter than 8 or longer than 256 characters, is
+    <strong>refused</strong> rather than escaped. Escaping it would produce a tag the policy does not
+    match, which fails as a silently blank page instead of a visible error.</p>
+  </div>
+</section>
+
+<section id="hotreload">
+  <h2>Hot reload</h2>
+  <p>Recompile a page when its file changes, so a running server picks up edits without a restart:</p>
+
+<pre><code>const page = load(path.join(__dirname, 'page.html'));
+
+if (process.env.NODE_ENV !== 'production') {
+  watch(page);
+}</code></pre>
+
+  <p>Setup blocks re-run too, so a change to setup code takes effect and not only the markup. Files
+  pulled in by <code>&lt;weld src&gt;</code> are watched as well, so editing a shared header rebuilds
+  the pages that include it.</p>
+
+  <p>Rapid writes are debounced into one rebuild, in-flight requests keep the page they already
+  resolved, and <code>watcher.close()</code> stops it. Watching the same page twice returns the
+  existing watcher rather than opening a second one.</p>
+
+  <div class="warn">
+    <p>Development only. It holds an open file handle per watched file, and a production server has
+    no reason to re-read pages it compiled at boot.</p>
+  </div>
+</section>
+
 <section id="express">
   <h2>Using Express</h2>
   <p><code>render()</code> needs only <code>response.write(chunk)</code> returning a boolean and a
@@ -681,6 +796,18 @@ app.listen(3000);</code></pre>
   <p class="muted">The original source Buffer is not retained. Each static run is copied into its
   own allocation at compile time so the source can be collected — holding it would make every page
   cost its own size twice, which matters once an app has hundreds of pages.</p>
+
+  <div class="sig">router(directory, options?)</div>
+  <p>Maps a directory of <code>.html</code> files to routes, resolved once at startup. Returns an
+  Express-compatible middleware. <code>middleware.routes</code> lists what was mounted.</p>
+
+  <div class="sig">watch(page, options?)</div>
+  <p>Recompiles the page when its file, or any file it includes, changes. Development only.
+  <code>options.onChange</code> is called after each rebuild; <code>options.dependencies</code>
+  overrides the watched extras. Returns a watcher with <code>close()</code> and <code>files</code>.</p>
+
+  <div class="sig">page.dependencies &middot; page.invalidate()</div>
+  <p>The files pulled in by <code>&lt;weld src&gt;</code>, and a manual rebuild trigger.</p>
 
   <div class="sig">await shared(key, factory)</div>
   <p>Process-wide resource cache. The factory runs once per key; concurrent callers receive the same

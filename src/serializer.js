@@ -126,8 +126,34 @@ function assertSerializable(value) {
   snapshot(value, 0, '$', new WeakSet(), { used: 0 });
 }
 
-function clientScript(name, value) {
-  return Buffer.from(`<script>const ${name}=${serialize(value)};</script>`);
+// A nonce must be exactly what the Content-Security-Policy header advertises.
+// Anything outside this set could close the attribute and inject markup, so a
+// bad nonce is refused rather than escaped: silently altering it would produce a
+// tag the policy does not match, which fails as a blank page rather than an
+// error. Base64 covers what crypto.randomBytes().toString('base64') produces.
+const NONCE_PATTERN = /^[A-Za-z0-9+/_-]{8,256}={0,2}$/;
+
+function clientScript(name, value, nonce) {
+  const serialized = serialize(value);
+
+  if (nonce === undefined || nonce === null) {
+    return Buffer.from(`<script>const ${name}=${serialized};</script>`);
+  }
+
+  if (typeof nonce !== 'string' || !NONCE_PATTERN.test(nonce)) {
+    throw new TypeError(
+      'CSP nonce must be a base64-ish string of 8 to 256 characters'
+    );
+  }
+
+  return Buffer.from(`<script nonce="${nonce}">const ${name}=${serialized};</script>`);
 }
 
-module.exports = { serialize, clientScript, assertSerializable, MAX_DEPTH, MAX_EXPORT_BYTES };
+module.exports = {
+  serialize,
+  clientScript,
+  assertSerializable,
+  MAX_DEPTH,
+  MAX_EXPORT_BYTES,
+  NONCE_PATTERN
+};

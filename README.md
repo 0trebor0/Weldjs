@@ -26,7 +26,11 @@ console.log(users);
 - All non-`<weld>` HTML is retained as slices of the original Buffer.
 - The page is compiled once; normal requests do not rescan or recompile the HTML.
 - `shared(key, factory)` is available inside setup code for resources that should be shared across pages.
+- `<weld src="partials/header.html">` includes another file at compile time, so layouts cost nothing per request.
 - `load(file)` returns a page synchronously and compiles it in the background, so a server needs no async wrapper.
+- `router(dir)` maps a directory of `.html` files to routes, including `[slug]` parameters.
+- `watch(page)` recompiles on edit during development, including files pulled in by `<weld src>`.
+- A CSP nonce on `res.locals.cspNonce` is applied to the emitted script automatically.
 - `page.handler` is a ready-made route handler: `app.get('/', page.handler)` renders, ends the response, and forwards errors to `next`.
 
 ## Documentation

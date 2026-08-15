@@ -378,6 +378,41 @@ matters, a minimum interval between attempts is the obvious next step.
 Tests added: a held page recovering after correction, and a successful compile not being
 repeated on later requests.
 
+## Fifteenth pass: routing, CSP nonce, hot reload, includes
+
+Four features, built in the order the user asked for. Ordering note raised up front: hot
+reload needs to know about include dependencies, so `watch()` was designed to take a
+dependency set and includes plugged into it without rework.
+
+**File-based routing** (`src/router.js`). Route table built once at startup by walking the
+directory; the filesystem is never consulted at request time, so traversal has nothing to
+match. Verified over raw sockets, because Node's HTTP *client* normalises `%2e%2e` before
+sending and made an early check look like a failure: `/blog/%2e%2e`,
+`/%2e%2e/%2e%2e/etc/passwd`, `/blog/..`, `/blog/%00` and `/blog/%ZZ` all return 404.
+Static routes are one Map lookup; dynamic routes are bucketed by segment count. Symlinked
+directories are not followed and the walk is depth-capped at 32.
+
+**CSP nonce**. The inline `<script>` was incompatible with a strict policy. A nonce on
+`res.locals.cspNonce` or `res.locals.nonce` is applied automatically — zero configuration
+for the common helmet setups. A malformed nonce is refused rather than escaped: escaping
+produces a tag the policy will not match, which fails as a blank page instead of an error.
+
+**Hot reload** (`watch`). Debounced rebuild on change, setup blocks re-run, idempotent per
+page, `close()` stops it, and included files are watched too. `page.invalidate()` was added
+to support it and is useful on its own.
+
+**Includes**. `<weld src="...">` is expanded before scanning, so the scanner and compiler
+are unchanged and the included markup merges into the surrounding static runs — a page with
+two partials still writes two buffers. Duplicate variable names across a partial and its
+page are caught by the scanner's existing check, for free. Cycles refused, depth capped
+at 16.
+
+Regression check: render throughput unchanged at 33,000-35,000 renders/sec across four runs
+(one 28,294 outlier was not reproducible). Unit tests 43 -> 64; all five sweeps still pass.
+
+One test earned its keep: "a loaded page exposes the same surface as a compiled one" failed
+the moment `dependencies` was added to compiled pages but not loaded ones.
+
 ## Assumptions, limitations, remaining risks
 
 - **Serialization is ~35% slower** on large payloads (1.94 ms → 2.61 ms for a 224 KB

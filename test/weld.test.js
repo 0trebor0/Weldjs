@@ -6,9 +6,10 @@ const vm = require('node:vm');
 const http = require('node:http');
 const fsMod = require('node:fs');
 const os = require('node:os');
+const net = require('node:net');
 const path = require('node:path');
 const { EventEmitter } = require('node:events');
-const { compileSource, compileFile, scan, serialize, clearShared, load, clearLoaded, MAX_DEPTH, MAX_EXPORT_BYTES } = require('../src');
+const { compileSource, compileFile, scan, serialize, clearShared, load, clearLoaded, router, watch, MAX_DEPTH, MAX_EXPORT_BYTES } = require('../src');
 
 test.afterEach(() => { clearShared(); clearLoaded(); });
 
@@ -135,6 +136,47 @@ function fakeResponse() {
   return response;
 }
 
+test('a CSP nonce on res.locals reaches the emitted script', async () => {
+  const page = await compileSource('<p>a</p><weld var="v">return 1;</weld>');
+
+  for (const key of ['cspNonce', 'nonce']) {
+    const response = fakeResponse();
+    response.locals = { [key]: 'r4nd0mBase64Value==' };
+
+    await page.render(Object.create(null), response);
+
+    const body = Buffer.concat(response.chunks).toString();
+    assert.ok(
+      body.includes('<script nonce="r4nd0mBase64Value==">const v=1;</script>'),
+      `${key} was not applied: ${body}`
+    );
+  }
+});
+
+test('no nonce is emitted when none is set', async () => {
+  const page = await compileSource('<weld var="v">return 1;</weld>');
+  const output = (await page.renderToBuffer()).toString();
+
+  assert.equal(output, '<script>const v=1;</script>');
+});
+
+test('a malformed nonce is refused rather than escaped into the tag', async () => {
+  const page = await compileSource('<weld var="v">return 1;</weld>');
+
+  // A nonce that could close the attribute would produce markup the policy does
+  // not match, which fails as a blank page rather than a visible error.
+  for (const bad of ['" onload="alert(1)', 'short', '', 'has spaces', 'x'.repeat(300), 42]) {
+    const response = fakeResponse();
+    response.locals = { cspNonce: bad };
+
+    await assert.rejects(
+      () => page.render(Object.create(null), response),
+      /CSP nonce must be/,
+      `accepted a bad nonce: ${String(bad)}`
+    );
+  }
+});
+
 test('load returns a page synchronously and serves once compiled', async () => {
   const page = load(path.join(__dirname, '..', 'example', 'page.html'));
 
@@ -257,6 +299,251 @@ test('a loaded page exposes the same surface as a compiled one', async () => {
   const missing = Object.keys(compiled).filter((key) => loaded[key] === undefined);
   assert.deepEqual(missing, [], `loaded page missing: ${missing.join(', ')}`);
   assert.ok(Array.isArray(loaded.parts));
+});
+
+function rawRequest(port, line) {
+  return new Promise((resolve) => {
+    const socket = net.connect(port, '127.0.0.1', () => {
+      socket.write(`GET ${line} HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n`);
+    });
+    let buffer = '';
+    socket.on('data', (chunk) => { buffer += chunk; });
+    socket.on('end', () => resolve(buffer));
+  });
+}
+
+async function withRouter(run) {
+  const mount = router(path.join(__dirname, '..', 'example', 'pages'));
+  const server = http.createServer((request, response) => {
+    mount(request, response, () => {
+      response.statusCode = 404;
+      response.end('not found');
+    });
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    await run(server.address().port, mount);
+  } finally {
+    server.close();
+  }
+}
+
+test('router maps files to routes, including index and parameters', async () => {
+  await withRouter(async (port, mount) => {
+    assert.deepEqual(mount.routes, ['/', '/about', '/blog', '/blog/[slug]', '/with-partials']);
+
+    const cases = [
+      ['/', 'home'],
+      ['/about', 'about'],
+      ['/blog', 'blog-index'],
+      ['/blog/hello-world', 'post']
+    ];
+
+    for (const [route, name] of cases) {
+      const raw = await rawRequest(port, route);
+      assert.match(raw, /^HTTP\/1\.1 200 OK/, `${route} did not return 200`);
+      assert.match(raw, new RegExp(`"name":"${name}"`), `${route} served the wrong page`);
+    }
+  });
+});
+
+test('router exposes path parameters on request.params', async () => {
+  await withRouter(async (port) => {
+    const raw = await rawRequest(port, '/blog/my-first-post');
+    assert.match(raw, /"slug":"my-first-post"/);
+
+    // Percent-encoded values are decoded before matching.
+    const encoded = await rawRequest(port, '/blog/caf%C3%A9');
+    assert.match(encoded, /"slug":"café"/);
+  });
+});
+
+test('router refuses traversal, null bytes and malformed encoding', async () => {
+  await withRouter(async (port) => {
+    const attacks = [
+      '/blog/%2e%2e',
+      '/%2e%2e/%2e%2e/etc/passwd',
+      '/blog/..',
+      '/blog/%2e%2e/%2e%2e',
+      '/blog/%00',
+      '/blog/%ZZ',
+      '/nope'
+    ];
+
+    for (const attack of attacks) {
+      const raw = await rawRequest(port, attack);
+      assert.match(raw, /^HTTP\/1\.1 404 Not Found/, `${attack} was not rejected`);
+      assert.ok(!raw.includes('const page='), `${attack} served a page`);
+    }
+  });
+});
+
+test('router passes non-GET methods through', async () => {
+  const mount = router(path.join(__dirname, '..', 'example', 'pages'));
+
+  let passed = false;
+  mount({ method: 'POST', url: '/about' }, {}, () => { passed = true; });
+  assert.ok(passed, 'POST was handled instead of being passed on');
+});
+
+test('router validates its arguments', () => {
+  assert.throws(() => router(42), /non-empty string directory/);
+  assert.throws(() => router(''), /non-empty string directory/);
+  assert.throws(() => router(path.join(__dirname, 'nope-not-here')), /is not a directory/);
+  assert.throws(
+    () => router(path.join(__dirname, '..', 'example', 'pages'), null),
+    /options must be an object/
+  );
+});
+
+test('weld src includes a file at compile time with no per-request cost', async () => {
+  const page = await compileFile(path.join(__dirname, '..', 'example', 'pages', 'with-partials.html'));
+  const output = (await page.renderToBuffer()).toString();
+
+  assert.match(output, /<nav><a href="\/">Home<\/a>/, 'header was not included');
+  assert.match(output, /Shared footer/, 'footer was not included');
+  assert.ok(!output.includes('<weld'), 'an include tag survived into the output');
+
+  // The included markup is merged into the surrounding static runs, so it costs
+  // nothing extra to write per request.
+  assert.equal(page.parts.filter((part) => part.type === 'html').length, 2);
+  assert.equal(page.dependencies.length, 2);
+});
+
+test('includes resolve relative to the including file and nest', async () => {
+  const dir = fsMod.mkdtempSync(path.join(os.tmpdir(), 'weld-inc-'));
+  fsMod.mkdirSync(path.join(dir, 'deep'));
+
+  fsMod.writeFileSync(path.join(dir, 'deep', 'inner.html'), '<i>inner</i>');
+  fsMod.writeFileSync(path.join(dir, 'deep', 'middle.html'), '<b><weld src="inner.html"></weld></b>');
+  fsMod.writeFileSync(path.join(dir, 'page.html'), '<p><weld src="deep/middle.html"></weld></p>');
+
+  const page = await compileFile(path.join(dir, 'page.html'));
+  const output = (await page.renderToBuffer()).toString();
+
+  assert.equal(output, '<p><b><i>inner</i></b></p>');
+  assert.equal(page.dependencies.length, 2);
+
+  fsMod.rmSync(dir, { recursive: true, force: true });
+});
+
+test('an include cycle is refused rather than looping', async () => {
+  const dir = fsMod.mkdtempSync(path.join(os.tmpdir(), 'weld-cycle-'));
+  fsMod.writeFileSync(path.join(dir, 'a.html'), '<a><weld src="b.html"></weld></a>');
+  fsMod.writeFileSync(path.join(dir, 'b.html'), '<b><weld src="a.html"></weld></b>');
+
+  await assert.rejects(() => compileFile(path.join(dir, 'a.html')), /cycle/);
+
+  // Self-inclusion is the degenerate case.
+  fsMod.writeFileSync(path.join(dir, 'self.html'), '<weld src="self.html"></weld>');
+  await assert.rejects(() => compileFile(path.join(dir, 'self.html')), /cycle/);
+
+  fsMod.rmSync(dir, { recursive: true, force: true });
+});
+
+test('a missing or malformed include is rejected clearly', async () => {
+  const dir = fsMod.mkdtempSync(path.join(os.tmpdir(), 'weld-badinc-'));
+
+  fsMod.writeFileSync(path.join(dir, 'missing.html'), '<weld src="nope.html"></weld>');
+  await assert.rejects(() => compileFile(path.join(dir, 'missing.html')), /ENOENT/);
+
+  fsMod.writeFileSync(path.join(dir, 'both.html'), '<weld src="x.html" var="y"></weld>');
+  await assert.rejects(() => compileFile(path.join(dir, 'both.html')), /cannot also declare var/);
+
+  fsMod.writeFileSync(path.join(dir, 'body.html'), '<weld src="x.html">const a = 1;</weld>');
+  await assert.rejects(() => compileFile(path.join(dir, 'body.html')), /must be empty/);
+
+  fsMod.writeFileSync(path.join(dir, 'empty.html'), '<weld src=""></weld>');
+  await assert.rejects(() => compileFile(path.join(dir, 'empty.html')), /requires a file path/);
+
+  fsMod.rmSync(dir, { recursive: true, force: true });
+});
+
+test('duplicate variable names across included files are caught', async () => {
+  const dir = fsMod.mkdtempSync(path.join(os.tmpdir(), 'weld-dupinc-'));
+  fsMod.writeFileSync(path.join(dir, 'partial.html'), '<weld var="shared">return 1;</weld>');
+  fsMod.writeFileSync(
+    path.join(dir, 'page.html'),
+    '<weld src="partial.html"></weld><weld var="shared">return 2;</weld>'
+  );
+
+  await assert.rejects(
+    () => compileFile(path.join(dir, 'page.html')),
+    /Duplicate client variable name "shared"/
+  );
+
+  fsMod.rmSync(dir, { recursive: true, force: true });
+});
+
+test('watch rebuilds a page when its file changes', async () => {
+  const target = path.join(os.tmpdir(), `weld-watch-${process.pid}.html`);
+  fsMod.writeFileSync(target, '<h1>v1</h1><weld>const n = 1;</weld><weld var="v">return n;</weld>');
+
+  const page = load(target);
+  await page.ready;
+
+  const watcher = watch(page);
+  try {
+    assert.match((await page.renderToBuffer()).toString(), /<h1>v1<\/h1>.*const v=1;/);
+
+    // Setup code changes too, so this proves setup re-ran, not just the markup.
+    fsMod.writeFileSync(target, '<h1>v2</h1><weld>const n = 99;</weld><weld var="v">return n;</weld>');
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    assert.match((await page.renderToBuffer()).toString(), /<h1>v2<\/h1>.*const v=99;/);
+  } finally {
+    watcher.close();
+    fsMod.unlinkSync(target);
+  }
+});
+
+test('watch stops after close and validates its arguments', async () => {
+  const target = path.join(os.tmpdir(), `weld-watch-stop-${process.pid}.html`);
+  fsMod.writeFileSync(target, '<weld var="v">return 1;</weld>');
+
+  const page = load(target);
+  await page.ready;
+
+  const watcher = watch(page);
+  assert.equal(watch(page), watcher, 'watching twice created a second watcher');
+  watcher.close();
+
+  fsMod.writeFileSync(target, '<weld var="v">return 2;</weld>');
+  await new Promise((resolve) => setTimeout(resolve, 200));
+
+  assert.match((await page.renderToBuffer()).toString(), /const v=1;/, 'rebuilt after close');
+
+  assert.throws(() => watch(null), /requires a page from load/);
+  assert.throws(() => watch({}), /requires a page from load/);
+  assert.throws(() => watch(page, null), /options must be an object/);
+
+  fsMod.unlinkSync(target);
+});
+
+test('watch also rebuilds when an included file changes', async () => {
+  const dir = fsMod.mkdtempSync(path.join(os.tmpdir(), 'weld-watchinc-'));
+  const partial = path.join(dir, 'partial.html');
+  const target = path.join(dir, 'page.html');
+
+  fsMod.writeFileSync(partial, '<header>one</header>');
+  fsMod.writeFileSync(target, '<weld src="partial.html"></weld><weld var="v">return 1;</weld>');
+
+  const page = load(target);
+  await page.ready;
+
+  const watcher = watch(page);
+  try {
+    assert.equal(watcher.files.length, 2, 'the partial was not watched');
+
+    fsMod.writeFileSync(partial, '<header>two</header>');
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    assert.match((await page.renderToBuffer()).toString(), /<header>two<\/header>/);
+  } finally {
+    watcher.close();
+    fsMod.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('load validates its argument', () => {

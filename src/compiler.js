@@ -91,6 +91,58 @@ function buildRuntimeParts(parsed, handlers) {
   return runtimeParts;
 }
 
+// Bounds include nesting. A cycle is already caught by the chain check below;
+// this also stops a legal but absurd depth from exhausting the stack.
+const MAX_INCLUDE_DEPTH = 16;
+
+// Replaces every <weld src="..."> with the contents of that file, recursively,
+// before anything else runs. The scanner and compiler then work on the expanded
+// bytes exactly as they would on a single file, so includes cost nothing per
+// request and variable-name collisions across included files are caught by the
+// scanner's existing duplicate check.
+function expandIncludes(source, filename, chain, depth, dependencies) {
+  if (depth > MAX_INCLUDE_DEPTH) {
+    throw new Error(`<weld src> nested deeper than ${MAX_INCLUDE_DEPTH} levels in ${filename}`);
+  }
+
+  const parsed = scan(source);
+  const includes = parsed.parts.filter((part) => part.type === 'weld' && part.mode === 'include');
+  if (includes.length === 0) return parsed.source;
+
+  const directory = path.dirname(filename);
+  const pieces = [];
+  let cursor = 0;
+
+  for (const part of includes) {
+    const resolved = path.resolve(directory, part.src);
+
+    // A file may not include itself, directly or through a chain.
+    if (chain.includes(resolved)) {
+      throw new Error(
+        `<weld src> cycle: ${[...chain, resolved].map((f) => path.basename(f)).join(' -> ')}`
+      );
+    }
+
+    let included;
+    try {
+      included = fs.readFileSync(resolved);
+    } catch (error) {
+      throw new Error(`<weld src="${part.src}"> in ${filename}: ${error.message}`);
+    }
+
+    dependencies.add(resolved);
+
+    pieces.push(parsed.source.subarray(cursor, part.tagStart));
+    pieces.push(
+      expandIncludes(included, resolved, [...chain, resolved], depth + 1, dependencies)
+    );
+    cursor = part.tagEnd;
+  }
+
+  pieces.push(parsed.source.subarray(cursor));
+  return Buffer.concat(pieces);
+}
+
 async function compileSource(input, options = {}) {
   // Validated here rather than left to path.resolve, so a bad argument names
   // the option that was wrong instead of surfacing as "paths[0]".
@@ -103,7 +155,11 @@ async function compileSource(input, options = {}) {
   }
 
   const filename = path.resolve(options.filename || 'page.html');
-  const parsed = scan(input);
+
+  const dependencies = new Set();
+  const expanded = expandIncludes(input, filename, [filename], 0, dependencies);
+
+  const parsed = scan(expanded);
   const factorySource = buildFactorySource(parsed);
   const pageRequire = createRequire(filename);
 
@@ -127,6 +183,7 @@ async function compileSource(input, options = {}) {
 
   async function renderToBuffer(request = Object.create(null), response = null) {
     const values = await resolveValues(request, response);
+    const nonce = nonceFor(response);
     const chunks = [];
 
     for (const part of runtimeParts) {
@@ -135,17 +192,30 @@ async function compileSource(input, options = {}) {
         continue;
       }
 
-      chunks.push(scriptFor(part, values[part.valueIndex]));
+      chunks.push(scriptFor(part, values[part.valueIndex], nonce));
     }
 
     return Buffer.concat(chunks);
   }
 
+  // The emitted <script> is inline, which a strict Content-Security-Policy
+  // blocks outright: the page renders and the data silently never arrives. A
+  // nonce on res.locals is picked up automatically, matching what helmet and the
+  // common Express setups already set, so no configuration is needed.
+  function nonceFor(response) {
+    if (response === null || typeof response !== 'object') return undefined;
+
+    const locals = response.locals;
+    if (locals === null || typeof locals !== 'object') return undefined;
+
+    return locals.cspNonce !== undefined ? locals.cspNonce : locals.nonce;
+  }
+
   // The serializer reports a path within the value ("$.rows[2]"), which is not
   // enough to locate the block on a page with many of them.
-  function scriptFor(part, value) {
+  function scriptFor(part, value, nonce) {
     try {
-      return clientScript(part.varName, value);
+      return clientScript(part.varName, value, nonce);
     } catch (error) {
       throw new TypeError(
         `<weld var="${part.varName}"> in ${filename}: ${error.message}`,
@@ -185,6 +255,7 @@ async function compileSource(input, options = {}) {
     }
 
     const values = await resolveValues(request, response);
+    const nonce = nonceFor(response);
 
     const chunks = [];
     let total = 0;
@@ -192,7 +263,7 @@ async function compileSource(input, options = {}) {
     for (const part of runtimeParts) {
       const chunk = part.type === 'html'
         ? part.buffer
-        : scriptFor(part, values[part.valueIndex]);
+        : scriptFor(part, values[part.valueIndex], nonce);
 
       chunks.push(chunk);
       total += chunk.length;
@@ -265,6 +336,8 @@ async function compileSource(input, options = {}) {
   // reads it, and holding it would double the memory cost of every page.
   return Object.freeze({
     filename,
+    // Files pulled in by <weld src>, so watch() can rebuild when one changes.
+    dependencies: Object.freeze([...dependencies]),
     parts: runtimeParts,
     handler,
     render,
@@ -338,6 +411,12 @@ function load(filename) {
   const page = Object.freeze({
     filename: absolute,
 
+    // Files pulled in by <weld src>, so watch() can rebuild when a shared
+    // partial changes. Empty until compilation has produced them.
+    get dependencies() {
+      return compiled === null ? [] : compiled.dependencies;
+    },
+
     // A getter, not a fixed promise: after a failure it starts a fresh attempt,
     // so awaiting it again re-checks the file rather than replaying the error.
     get ready() {
@@ -348,6 +427,15 @@ function load(filename) {
     // surface as a compiled one.
     get parts() {
       return compiled === null ? undefined : compiled.parts;
+    },
+
+    // Drops the compiled page so the next use rebuilds from disk. Setup blocks
+    // run again, which is the point: an edit to setup code takes effect too.
+    // In-flight requests keep the page they already resolved.
+    invalidate() {
+      compiled = null;
+      pending = null;
+      return ensureCompiled();
     },
 
     handler(request, response, next) {
@@ -378,8 +466,88 @@ function load(filename) {
   return page;
 }
 
+// Watchers keyed by the page they belong to, so stopping is idempotent and a
+// page is never watched twice.
+const watchers = new Map();
+
+// Recompiles a page when its file changes. Development only: it holds an open
+// file watcher and lets a running server pick up edits without a restart.
+//
+//   const page = load('./page.html');
+//   if (process.env.NODE_ENV !== 'production') watch(page);
+//
+// dependencies lets a page declare other files that should also trigger a
+// rebuild. Nothing produces them yet; includes will.
+function watch(page, options = {}) {
+  if (page === null || typeof page !== 'object' || typeof page.filename !== 'string') {
+    throw new TypeError('watch() requires a page from load()');
+  }
+
+  if (options === null || typeof options !== 'object') {
+    throw new TypeError('watch() options must be an object');
+  }
+
+  const existing = watchers.get(page.filename);
+  if (existing) return existing;
+
+  const onChange = typeof options.onChange === 'function' ? options.onChange : null;
+
+  // Files pulled in by <weld src> are watched too, so editing a shared header
+  // rebuilds every page that includes it. They are read from the compiled page
+  // when it is available; an explicit list overrides that.
+  const dependencies = Array.isArray(options.dependencies)
+    ? options.dependencies
+    : (Array.isArray(page.dependencies) ? page.dependencies : []);
+
+  for (const dependency of dependencies) {
+    if (typeof dependency !== 'string' || dependency.length === 0) {
+      throw new TypeError('watch() dependencies must be non-empty strings');
+    }
+  }
+
+  const targets = [page.filename, ...dependencies.map((file) => path.resolve(file))];
+  const handles = [];
+
+  // Editors often write a file as several events; a short debounce collapses
+  // them into one rebuild instead of compiling the same file three times.
+  let timer = null;
+  const rebuild = () => {
+    if (timer !== null) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = null;
+      const invalidated = page.invalidate();
+      if (onChange) onChange(page);
+      invalidated.catch(() => {});   // failures already report through page.ready
+    }, 20);
+    if (typeof timer.unref === 'function') timer.unref();
+  };
+
+  for (const target of targets) {
+    try {
+      handles.push(fs.watch(target, { persistent: false }, rebuild));
+    } catch (error) {
+      // A dependency that cannot be watched should not stop the others.
+      console.error(`WeldJS: cannot watch ${target}: ${error.message}`);
+    }
+  }
+
+  const watcher = Object.freeze({
+    page,
+    files: Object.freeze(targets.slice()),
+    close() {
+      if (timer !== null) clearTimeout(timer);
+      for (const handle of handles) handle.close();
+      watchers.delete(page.filename);
+    }
+  });
+
+  watchers.set(page.filename, watcher);
+  return watcher;
+}
+
 function clearLoaded() {
+  for (const watcher of [...watchers.values()]) watcher.close();
   loaded.clear();
 }
 
-module.exports = { compileSource, compileFile, load, clearLoaded };
+module.exports = { compileSource, compileFile, load, watch, clearLoaded };

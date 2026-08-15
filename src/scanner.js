@@ -166,10 +166,26 @@ function scan(input) {
     }
 
     const attrs = parseAttributes(source, tagStart + OPEN.length, openEnd);
-    const allowed = new Set(['var']);
+    const allowed = new Set(['var', 'src']);
     for (const name of Object.keys(attrs)) {
       if (!allowed.has(name)) {
         throw new WeldSyntaxError(`Unsupported <weld> attribute "${name}"`, tagStart);
+      }
+    }
+
+    if (attrs.src !== undefined) {
+      if (attrs.var !== undefined) {
+        throw new WeldSyntaxError('A <weld src> block cannot also declare var', tagStart);
+      }
+
+      if (attrs.src.length === 0) {
+        throw new WeldSyntaxError('<weld src> requires a file path', tagStart);
+      }
+
+      // The body would be silently discarded by the include, so a non-empty one
+      // is almost certainly a mistake.
+      if (source.subarray(openEnd + 1, closeStart).toString('utf8').trim().length > 0) {
+        throw new WeldSyntaxError('A <weld src> block must be empty', tagStart);
       }
     }
 
@@ -191,7 +207,10 @@ function scan(input) {
 
     parts.push({
       type: 'weld',
-      mode: attrs.var === undefined ? 'setup' : 'request',
+      mode: attrs.src !== undefined
+        ? 'include'
+        : (attrs.var === undefined ? 'setup' : 'request'),
+      src: attrs.src,
       varName: attrs.var,
       tagStart,
       tagEnd: closeStart + CLOSE.length,
