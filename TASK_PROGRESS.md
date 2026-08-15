@@ -354,6 +354,30 @@ runs exactly once across repeated loads, `clearLoaded()` forces a fresh compile,
 and `renderToBuffer` both work through a loaded page, and 30 HTTP requests arriving during
 compilation all returned 200 with their own correct data.
 
+## Fourteenth pass: make failed compiles actually recoverable
+
+The thirteenth pass evicted failed entries from the `load()` cache, which was an incomplete
+fix. Evicting the map entry only helps a caller that calls `load()` again; a server calls
+it once at boot and then holds the page object, whose `ready` promise had already rejected.
+Verified: correcting the file left the held page failing forever.
+
+The retry now lives on the page object. `ensureCompiled()` caches only a successful compile
+and clears the pending promise on failure, so the next request tries again. `ready` became a
+getter for the same reason — a fixed promise would replay the old error forever.
+
+Verified with the real-server pattern: load once, hold the object, compile fails, correct
+the file, and the next request succeeds with `parts` populated. No restart, no second
+`load()` call.
+
+Cost of the retry, measured on a ~16 KB page: a persistently broken page recompiles per
+request at 0.45 ms, against 0.012 ms for a healthy one — about 37x, still 2,200 requests
+per second. Accepted without a cooldown: this is a short-lived error state, and a retry
+throttle would be speculative complexity. If a broken page under sustained load ever
+matters, a minimum interval between attempts is the obvious next step.
+
+Tests added: a held page recovering after correction, and a successful compile not being
+repeated on later requests.
+
 ## Assumptions, limitations, remaining risks
 
 - **Serialization is ~35% slower** on large payloads (1.94 ms → 2.61 ms for a 224 KB

@@ -181,6 +181,44 @@ test('load reports a compile failure through ready and through next', async () =
   fsMod.unlinkSync(broken);
 });
 
+test('a held page recovers after the file is corrected, without reloading it', async () => {
+  const target = path.join(os.tmpdir(), `weld-recover-${process.pid}.html`);
+  fsMod.writeFileSync(target, '<p>a</p><weld var="x">return 1;');   // missing </weld>
+
+  // The real server pattern: load once at boot, then hold this object forever.
+  const page = load(target);
+  await assert.rejects(() => page.ready, /Missing <\/weld>/);
+
+  fsMod.writeFileSync(target, '<p>a</p><weld var="x">return 42;</weld>');
+
+  // Same object, no second load() call, no restart.
+  const output = (await page.renderToBuffer()).toString();
+  assert.match(output, /const x=42;/);
+  assert.ok(Array.isArray(page.parts));
+
+  fsMod.unlinkSync(target);
+});
+
+test('a successful compile is not repeated on later requests', async () => {
+  const target = path.join(os.tmpdir(), `weld-once-${process.pid}.html`);
+  fsMod.writeFileSync(
+    target,
+    '<weld>globalThis.__weldSetupRuns = (globalThis.__weldSetupRuns || 0) + 1;</weld><weld var="v">return 1;</weld>'
+  );
+
+  globalThis.__weldSetupRuns = 0;
+  const page = load(target);
+
+  await page.renderToBuffer();
+  await page.renderToBuffer();
+  await page.ready;
+
+  assert.equal(globalThis.__weldSetupRuns, 1, 'the page recompiled after succeeding');
+
+  delete globalThis.__weldSetupRuns;
+  fsMod.unlinkSync(target);
+});
+
 test('a failed compile is evicted so a corrected file can be loaded', async () => {
   const target = path.join(os.tmpdir(), `weld-evict-${process.pid}.html`);
   fsMod.writeFileSync(target, '<p>a</p><weld var="x">return 1;');   // missing </weld>

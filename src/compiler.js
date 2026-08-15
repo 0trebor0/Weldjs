@@ -303,32 +303,46 @@ function load(filename) {
   const existing = loaded.get(absolute);
   if (existing) return existing;
 
-  const ready = compileFile(absolute);
   let compiled = null;
+  let pending = null;
 
-  ready.then(
-    (result) => {
-      compiled = result;
-    },
-    (error) => {
-      // Evicted so a corrected file can be loaded without restarting the
-      // process, matching shared(), which also drops a failed entry. Caching the
-      // failure would leave a page broken for the lifetime of the process even
-      // after the author fixed it.
-      loaded.delete(absolute);
+  // A successful compile is kept forever; a failed one is not. Evicting the map
+  // entry is not enough on its own, because a server calls load() once at boot
+  // and then holds this page object — so the retry has to live here, on the page
+  // itself. A corrected file is picked up by the next request, with no restart.
+  function ensureCompiled() {
+    if (compiled !== null) return Promise.resolve(compiled);
+    if (pending !== null) return pending;
 
-      // A compile failure would otherwise stay invisible until the first
-      // request, where compileFile used to stop the server at boot. Report it
-      // immediately and keep the rejection handled; callers who want to exit can
-      // await page.ready.
-      console.error(`WeldJS: failed to compile ${absolute}`);
-      console.error(error);
-    }
-  );
+    pending = compileFile(absolute).then(
+      (result) => {
+        compiled = result;
+        pending = null;
+        return result;
+      },
+      (error) => {
+        pending = null;
+
+        // A compile failure would otherwise stay invisible until the first
+        // request, where compileFile used to stop the server at boot. Report it
+        // immediately; callers who want to exit can await page.ready.
+        console.error(`WeldJS: failed to compile ${absolute}`);
+        console.error(error);
+        throw error;
+      }
+    );
+
+    return pending;
+  }
 
   const page = Object.freeze({
     filename: absolute,
-    ready,
+
+    // A getter, not a fixed promise: after a failure it starts a fresh attempt,
+    // so awaiting it again re-checks the file rather than replaying the error.
+    get ready() {
+      return ensureCompiled();
+    },
 
     // Present once compilation finishes, so a loaded page exposes the same
     // surface as a compiled one.
@@ -337,7 +351,7 @@ function load(filename) {
     },
 
     handler(request, response, next) {
-      const finished = ready.then((compiled) => compiled.handler(request, response));
+      const finished = ensureCompiled().then((page_) => page_.handler(request, response));
 
       if (typeof next === 'function') {
         finished.catch(next);
@@ -348,15 +362,19 @@ function load(filename) {
     },
 
     render(request, response) {
-      return ready.then((compiled) => compiled.render(request, response));
+      return ensureCompiled().then((page_) => page_.render(request, response));
     },
 
     renderToBuffer(request, response) {
-      return ready.then((compiled) => compiled.renderToBuffer(request, response));
+      return ensureCompiled().then((page_) => page_.renderToBuffer(request, response));
     }
   });
 
   loaded.set(absolute, page);
+
+  // Start compiling now rather than on the first request, and keep this kickoff
+  // rejection handled — callers observe failures through ready or next.
+  ensureCompiled().catch(() => {});
   return page;
 }
 

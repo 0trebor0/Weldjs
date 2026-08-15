@@ -34,7 +34,7 @@
 
 ### Fixed
 
-- `load()` no longer caches a failed compile. A page that failed to compile stayed broken for the lifetime of the process even after the author fixed the file, and a path that did not exist yet could never be loaded once it appeared. Failures are now evicted, matching `shared()`, so a corrected file loads on the next call without a restart.
+- `load()` no longer caches a failed compile, and **a running server now recovers on its own**. A page that failed to compile stayed broken for the lifetime of the process even after the author fixed the file, and a path that did not exist yet could never be loaded once it appeared. Only a successful compile is cached now, and the retry lives on the page object itself — which is what matters, because a server calls `load()` once at boot and then holds that object, so evicting the cache entry alone would not have helped it. Correcting the file is picked up by the next request, with no restart and no second `load()` call. A page that stays broken is recompiled on each request: 0.45 ms versus 0.012 ms for a healthy one, so a persistent failure costs throughput until it is fixed.
 - A page from `load()` now exposes `parts` once compilation finishes, matching a page from `compileFile()`. It reads `undefined` while compilation is still in flight.
 - `page.handler` no longer throws synchronously when handed an unusable response. It touched `response.headersSent` before entering its promise chain, so `handler(req, null)` threw at the call site while every other failure arrived via `next` — and `handler(req, null).catch(...)` crashed instead of rejecting. All failures now report through the same channel.
 
