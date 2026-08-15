@@ -12,6 +12,12 @@
 
 ### Added
 
+- `example/express-server.js` — a complete Express example: compile-at-boot, static docs mounted at `/docs`, `setHeader` rather than `writeHead` so `Content-Length` is set, and an error handler that works on both Express 4 and 5. Express is not added as a dependency; install it yourself to run the example.
+
+### Security
+
+- Source input is now validated explicitly instead of being handed to `Buffer.from`, which accepts an array and silently reinterprets its elements as bytes. `scan([60,112,62])` and `compileSource([60,112,62])` previously compiled nonsense; both now throw. `compileSource()` also validates its options object and `options.filename`, `compileFile()` validates its path, and `render()` validates that the response can be written to — each with an error naming the argument rather than surfacing as an internal `paths[0]` failure.
+
 - `docs/index.html` — self-contained documentation page covering the tutorial, block model, request isolation, `req`/`res` access, Express integration, API reference, and security notes. No external assets, so it can be opened directly or served as a static file.
 
 ### Security

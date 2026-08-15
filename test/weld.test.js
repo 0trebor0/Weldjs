@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const vm = require('node:vm');
 const { EventEmitter } = require('node:events');
-const { compileSource, scan, serialize, clearShared, MAX_DEPTH, MAX_EXPORT_BYTES } = require('../src');
+const { compileSource, compileFile, scan, serialize, clearShared, MAX_DEPTH, MAX_EXPORT_BYTES } = require('../src');
 
 test.afterEach(() => clearShared());
 
@@ -116,6 +116,33 @@ test('nesting at the depth limit still serializes', () => {
   }
 
   assert.doesNotThrow(() => serialize(root));
+});
+
+test('source must be a string or Buffer, with no silent coercion', async () => {
+  // Buffer.from() accepts an array and reinterprets its elements as bytes, which
+  // would compile nonsense instead of rejecting it.
+  assert.throws(() => scan([60, 112, 62]), /must be a string or Buffer, received an array/);
+  assert.throws(() => scan(null), /received null/);
+  assert.throws(() => scan(42), /received a number/);
+  assert.throws(() => scan({}), /received a object/);
+
+  await assert.rejects(() => compileSource([60, 112, 62]), /must be a string or Buffer/);
+  await assert.doesNotReject(() => compileSource(Buffer.from('<p>ok</p>')));
+  await assert.doesNotReject(() => compileSource('<p>ok</p>'));
+});
+
+test('compile options are validated at the boundary', async () => {
+  await assert.rejects(() => compileSource('<p>x</p>', null), /options must be an object/);
+  await assert.rejects(() => compileSource('<p>x</p>', { filename: 42 }), /filename must be a string/);
+  await assert.rejects(() => compileFile(42), /non-empty string path/);
+  await assert.rejects(() => compileFile(''), /non-empty string path/);
+});
+
+test('render rejects a response it cannot write to', async () => {
+  const page = await compileSource('<p>a</p><weld var="v">return 1;</weld>');
+
+  await assert.rejects(() => page.render({}, null), /requires a response with a write\(\) method/);
+  await assert.rejects(() => page.render({}, {}), /requires a response with a write\(\) method/);
 });
 
 test('an oversized export is rejected', () => {

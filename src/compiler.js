@@ -92,6 +92,16 @@ function buildRuntimeParts(parsed, handlers) {
 }
 
 async function compileSource(input, options = {}) {
+  // Validated here rather than left to path.resolve, so a bad argument names
+  // the option that was wrong instead of surfacing as "paths[0]".
+  if (options === null || typeof options !== 'object') {
+    throw new TypeError('compileSource() options must be an object');
+  }
+
+  if (options.filename !== undefined && typeof options.filename !== 'string') {
+    throw new TypeError('compileSource() options.filename must be a string');
+  }
+
   const filename = path.resolve(options.filename || 'page.html');
   const parsed = scan(input);
   const factorySource = buildFactorySource(parsed);
@@ -168,6 +178,12 @@ async function compileSource(input, options = {}) {
   // is known to succeed, so a failing block yields a clean error instead of a
   // truncated page under an already-sent 200.
   async function render(request, response) {
+    if (response === null || typeof response !== 'object' || typeof response.write !== 'function') {
+      throw new TypeError(
+        'render() requires a response with a write() method; use renderToBuffer() to get bytes instead'
+      );
+    }
+
     const values = await resolveValues(request, response);
 
     const chunks = [];
@@ -216,6 +232,10 @@ async function compileSource(input, options = {}) {
 }
 
 async function compileFile(filename) {
+  if (typeof filename !== 'string' || filename.length === 0) {
+    throw new TypeError('compileFile() requires a non-empty string path');
+  }
+
   const absolute = path.resolve(filename);
   const source = fs.readFileSync(absolute);
   return compileSource(source, { filename: absolute });

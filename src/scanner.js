@@ -118,7 +118,19 @@ function parseAttributes(source, start, end) {
   return attrs;
 }
 
+function describe(value) {
+  if (value === null) return 'null';
+  if (Array.isArray(value)) return 'an array';
+  return `a ${typeof value}`;
+}
+
 function scan(input) {
+  // Checked explicitly rather than left to Buffer.from, which accepts an array
+  // and silently reinterprets its elements as bytes.
+  if (typeof input !== 'string' && !Buffer.isBuffer(input)) {
+    throw new TypeError(`Weld source must be a string or Buffer, received ${describe(input)}`);
+  }
+
   const source = Buffer.isBuffer(input) ? input : Buffer.from(input);
   const parts = [];
   const declared = new Set();

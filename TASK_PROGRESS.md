@@ -235,6 +235,34 @@ Tests added: oversized array rejected with the path named, single oversized stri
 rejected, huge sparse array rejected before its elements are walked, a normal 500-row
 payload well inside the limit, and the budget proven per-export rather than cumulative.
 
+## Ninth pass: rules audit and Express example
+
+Audited every file against `AGENTS.md` by probing each public entry point rather than
+reading for compliance. Result: one genuine violation, one weakness, both fixed.
+
+**Violation — silent coercion.** `scan()` and `compileSource()` passed input straight to
+`Buffer.from`, which accepts an array and reinterprets its elements as bytes, so
+`compileSource([60,112,62])` compiled `<p>` instead of rejecting a wrong-typed argument.
+This is exactly what the rules forbid: "do not silently coerce, repair, default, truncate,
+discard, or reinterpret invalid data". Now rejected explicitly.
+
+**Weakness — incidental validation.** Every other entry point did throw, but only because
+a Node builtin failed downstream, producing errors like `The "paths[0]" argument must be
+of type string` that name neither WeldJS nor the offending argument. `compileSource`
+options/filename, `compileFile` path, and the `render` response are now validated at the
+boundary with errors that name what was wrong.
+
+`shared()` already validated its own arguments and needed no change.
+
+Added `example/express-server.js`. Express is deliberately **not** added as a dependency,
+since the rules forbid adding one that is not required and the example works for anyone
+who installs it themselves. Verified: the file parses (`node --check`), and the exact call
+sequence it uses was exercised against a real `http.ServerResponse` — Express's `res` is
+one — giving `200` with `Content-Length: 413` and no chunked encoding, and a simulated
+block failure producing a clean `500` with no truncated page. The Express-specific wiring
+(routing, `express.static`, error middleware) is **not** executed here because the package
+is not installed.
+
 ## Assumptions, limitations, remaining risks
 
 - **Serialization is ~35% slower** on large payloads (1.94 ms → 2.61 ms for a 224 KB

@@ -37,6 +37,20 @@ serve it:
 app.use('/docs', express.static(path.join(__dirname, 'docs')));
 ```
 
+## Express
+
+`example/express-server.js` shows the same page served through Express, including
+static docs and an error handler. Express is not a dependency of this project, so
+install it yourself to run that example:
+
+```bash
+npm install express
+node example/express-server.js
+```
+
+Use `res.setHeader(...)` rather than `res.writeHead(...)` — `writeHead` marks the
+headers as sent, which stops `render()` adding `Content-Length`.
+
 ## Run
 
 ```bash
