@@ -12,6 +12,17 @@
 
 ### Added
 
+- **`load(filename)`** — returns a page **synchronously** and compiles it in the background, so a server no longer needs an async wrapper just to hold the await:
+
+  ```js
+  const page = load(path.join(__dirname, 'page.html'));
+  const app = express();
+
+  app.get('/', page.handler);
+  app.listen(3000);
+  ```
+
+  Requests arriving before compilation finishes wait for it rather than failing. Pages are cached by resolved path, so loading the same file twice returns the same page instead of compiling it and re-running its setup blocks twice. `page.ready` exposes the compile promise for callers who want to await it, and a compile failure is reported on stderr immediately as well as rejecting `ready` — add `page.ready.catch(() => process.exit(1))` to fail at boot instead of serving errors. `clearLoaded()` empties the cache for tests.
 - **`page.handler`** — a ready-made route handler, so serving a page no longer requires an async wrapper, a `res.end()` call, or hand-rolled error forwarding:
 
   ```js

@@ -4,10 +4,13 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const vm = require('node:vm');
 const http = require('node:http');
+const fsMod = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const { EventEmitter } = require('node:events');
-const { compileSource, compileFile, scan, serialize, clearShared, MAX_DEPTH, MAX_EXPORT_BYTES } = require('../src');
+const { compileSource, compileFile, scan, serialize, clearShared, load, clearLoaded, MAX_DEPTH, MAX_EXPORT_BYTES } = require('../src');
 
-test.afterEach(() => clearShared());
+test.afterEach(() => { clearShared(); clearLoaded(); });
 
 test('scanner leaves normal HTML as byte ranges', () => {
   const input = Buffer.from('<h1>A</h1><weld var="x">return 1;</weld><p>B</p>');
@@ -131,6 +134,57 @@ function fakeResponse() {
   response.end = () => { response.ended = true; };
   return response;
 }
+
+test('load returns a page synchronously and serves once compiled', async () => {
+  const page = load(path.join(__dirname, '..', 'example', 'page.html'));
+
+  // Available immediately, with no await at the call site.
+  assert.equal(typeof page.handler, 'function');
+  assert.ok(page.ready && typeof page.ready.then === 'function');
+
+  const response = fakeResponse();
+  await new Promise((resolve, reject) => {
+    page.handler(Object.create(null), response, (error) => reject(error));
+    setTimeout(resolve, 200);
+  });
+
+  assert.ok(response.ended, 'response was not ended');
+  assert.match(Buffer.concat(response.chunks).toString(), /const users=/);
+});
+
+test('load caches by resolved path so setup runs once', async () => {
+  const target = path.join(__dirname, '..', 'example', 'page.html');
+
+  const first = load(target);
+  const second = load(target);
+  const viaRelative = load(path.relative(process.cwd(), target));
+
+  assert.equal(first, second, 'same path returned different pages');
+  assert.equal(first, viaRelative, 'relative path was not resolved to the same page');
+
+  await first.ready;
+});
+
+test('load reports a compile failure through ready and through next', async () => {
+  const broken = path.join(os.tmpdir(), `weld-broken-${process.pid}.html`);
+  fsMod.writeFileSync(broken, '<p>a</p><weld var="x">return 1;');
+
+  const page = load(broken);
+
+  await assert.rejects(() => page.ready, /Missing <\/weld>/);
+
+  const error = await new Promise((resolve) => {
+    page.handler(Object.create(null), fakeResponse(), resolve);
+  });
+  assert.match(error.message, /Missing <\/weld>/);
+
+  fsMod.unlinkSync(broken);
+});
+
+test('load validates its argument', () => {
+  assert.throws(() => load(42), /non-empty string path/);
+  assert.throws(() => load(''), /non-empty string path/);
+});
 
 test('handler renders and ends the response without a wrapper', async () => {
   const page = await compileSource('<p>a</p><weld var="v">return 1;</weld><p>b</p>');

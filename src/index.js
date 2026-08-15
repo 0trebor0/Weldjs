@@ -1,11 +1,13 @@
 'use strict';
 
-const { compileFile, compileSource } = require('./compiler');
+const { compileFile, compileSource, load, clearLoaded } = require('./compiler');
 const { scan, WeldSyntaxError } = require('./scanner');
 const { serialize, assertSerializable, MAX_DEPTH, MAX_EXPORT_BYTES } = require('./serializer');
 const { shared, clearShared } = require('./shared');
 
 module.exports = {
+  load,
+  clearLoaded,
   compileFile,
   compileSource,
   scan,

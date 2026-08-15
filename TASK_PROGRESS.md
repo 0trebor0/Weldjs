@@ -311,6 +311,32 @@ Tests promoted into the suite: error-channel consistency across `null`/`undefine
 the rejected-promise contract without `next`, and a full real-HTTP request asserting status,
 content-type, Content-Length matching the body, and no chunked encoding.
 
+## Twelfth pass: load(), removing the async wrapper
+
+User feedback: the server was still wrapped in `async function main()` purely to hold the
+`await compileFile(...)`. Added `load(filename)`, which returns the page synchronously and
+compiles in the background. The whole server is now synchronous.
+
+- Requests arriving before compilation finishes wait for it. Verified over real HTTP: a
+  request fired immediately after `listen` returned 200 with the correct body, and a second
+  request returned byte-identical output.
+- Pages are cached by resolved path, so `load(abs)` and `load(relative)` return the same
+  page and setup blocks are not run twice. This closes the caching gap noted earlier.
+- `page.ready` exposes the compile promise.
+
+Trade-off accepted: `compileFile` failed at boot, which stopped a malformed page from ever
+serving. `load` cannot do that without an await, so a compile failure is instead reported
+on stderr immediately, rejects `page.ready`, and fails each request through `next`. Callers
+who want the old behaviour add `page.ready.catch(() => process.exit(1))`, which the example
+documents.
+
+Tests added: synchronous return and successful serve, caching across equivalent paths,
+compile failure surfaced through both `ready` and `next`, and argument validation.
+`clearLoaded()` was added so the cache does not leak between tests.
+
+Docs updated: the tutorial and Express sections no longer contain an `async function main`
+wrapper anywhere.
+
 ## Assumptions, limitations, remaining risks
 
 - **Serialization is ~35% slower** on large payloads (1.94 ms → 2.61 ms for a 224 KB

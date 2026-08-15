@@ -259,29 +259,25 @@ console.log(users);
 
 const path = require('node:path');
 const express = require('express');
-const { compileFile } = require('./src');
+const { load } = require('./src');
 
-async function main() {
-  // Compiled once. This is where &lt;weld&gt; setup blocks run.
-  const page = await compileFile(path.join(__dirname, 'views', 'profile.html'));
+// Returns immediately and compiles in the background, so no async wrapper is
+// needed. Setup &lt;weld&gt; blocks run once, here, not per request.
+const page = load(path.join(__dirname, 'views', 'profile.html'));
 
-  const app = express();
+const app = express();
 
-  // page.handler renders, ends the response, and forwards any failure to
-  // Express's error middleware. No async wrapper, no res.end(), no try/catch.
-  app.get('/profile', page.handler);
+// page.handler renders, ends the response, and forwards any failure to
+// Express's error middleware. No async wrapper, no res.end(), no try/catch.
+app.get('/profile', page.handler);
 
-  app.listen(3000, () =&gt; console.log('http://127.0.0.1:3000/profile'));
-}
-
-main().catch((err) =&gt; {
-  console.error(err);
-  process.exitCode = 1;
-});</code></pre>
+app.listen(3000, () =&gt; console.log('http://127.0.0.1:3000/profile'));</code></pre>
 
   <div class="warn">
-    <p><strong>Compile once, outside the route.</strong> Calling <code>compileFile</code> inside the
-    handler recompiles the file and re-runs your setup on every request, defeating the entire design.</p>
+    <p><strong>Load once, outside the route.</strong> Calling <code>load</code> or
+    <code>compileFile</code> inside the handler would recompile the file and re-run your setup on
+    every request, defeating the entire design. <code>load</code> caches by resolved path, so a
+    stray second call returns the same page rather than compiling twice.</p>
   </div>
 
   <h3 id="t-setup">3. Add a setup block</h3>
@@ -610,7 +606,9 @@ return { name: currentUser };
   <code>'drain'</code> event. Express's <code>res</code> is an <code>http.ServerResponse</code> and
   does not replace either, so it works unchanged.</p>
 
-<pre><code>app.use('/docs', express.static(path.join(__dirname, 'docs')));
+<pre><code>const page = load(path.join(__dirname, 'views', 'profile.html'));
+
+app.use('/docs', express.static(path.join(__dirname, 'docs')));
 
 // Already an Express handler: renders, ends, and forwards errors to next.
 app.get('/profile', page.handler);</code></pre>
@@ -627,6 +625,21 @@ app.get('/profile', page.handler);</code></pre>
 
 <section id="api">
   <h2>API</h2>
+
+  <div class="sig">load(filename)</div>
+  <p>Returns a page <strong>synchronously</strong> and compiles it in the background, so a server
+  needs no async wrapper. Requests arriving before compilation finishes wait for it. Loading the
+  same resolved path again returns the same page rather than compiling it twice.</p>
+<pre><code>const home = load(path.join(__dirname, &#39;views&#39;, &#39;home.html&#39;));
+
+app.get(&#39;/&#39;, home.handler);
+app.listen(3000);</code></pre>
+  <p>A compile failure is reported on stderr immediately and rejects <code>page.ready</code>;
+  requests then fail through <code>next</code>. To stop the process instead of serving errors,
+  add <code>page.ready.catch(() =&gt; process.exit(1))</code>.</p>
+
+  <div class="sig">page.ready</div>
+  <p>The compile promise, for callers who want to await compilation or fail at boot.</p>
 
   <div class="sig">await compileFile(filename)</div>
   <p>Reads and compiles an HTML file. Runs all setup blocks once. Returns a frozen page object.

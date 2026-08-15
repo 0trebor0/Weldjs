@@ -282,4 +282,67 @@ async function compileFile(filename) {
   return compileSource(source, { filename: absolute });
 }
 
-module.exports = { compileSource, compileFile };
+// Pages already loaded, keyed by resolved path, so that loading the same file
+// twice does not compile it twice or run its setup blocks twice.
+const loaded = new Map();
+
+// Returns a page synchronously and compiles it in the background, so a server
+// needs no async wrapper just to hold the await:
+//
+//   const home = weld.load('./views/home.html');
+//   app.get('/', home.handler);
+//   app.listen(3000);
+//
+// Requests arriving before compilation finishes wait for it rather than failing.
+function load(filename) {
+  if (typeof filename !== 'string' || filename.length === 0) {
+    throw new TypeError('load() requires a non-empty string path');
+  }
+
+  const absolute = path.resolve(filename);
+  const existing = loaded.get(absolute);
+  if (existing) return existing;
+
+  const ready = compileFile(absolute);
+
+  // A compile failure would otherwise stay invisible until the first request,
+  // where compileFile used to stop the server at boot. Report it immediately and
+  // keep the rejection handled; callers who want to exit can await page.ready.
+  ready.catch((error) => {
+    console.error(`WeldJS: failed to compile ${absolute}`);
+    console.error(error);
+  });
+
+  const page = Object.freeze({
+    filename: absolute,
+    ready,
+
+    handler(request, response, next) {
+      const finished = ready.then((compiled) => compiled.handler(request, response));
+
+      if (typeof next === 'function') {
+        finished.catch(next);
+        return undefined;
+      }
+
+      return finished;
+    },
+
+    render(request, response) {
+      return ready.then((compiled) => compiled.render(request, response));
+    },
+
+    renderToBuffer(request, response) {
+      return ready.then((compiled) => compiled.renderToBuffer(request, response));
+    }
+  });
+
+  loaded.set(absolute, page);
+  return page;
+}
+
+function clearLoaded() {
+  loaded.clear();
+}
+
+module.exports = { compileSource, compileFile, load, clearLoaded };
