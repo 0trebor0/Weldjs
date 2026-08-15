@@ -267,15 +267,9 @@ async function main() {
 
   const app = express();
 
-  app.get('/profile', async (req, res, next) =&gt; {
-    try {
-      res.type('html');
-      await page.render(req, res);
-      res.end();
-    } catch (err) {
-      next(err);
-    }
-  });
+  // page.handler renders, ends the response, and forwards any failure to
+  // Express's error middleware. No async wrapper, no res.end(), no try/catch.
+  app.get('/profile', page.handler);
 
   app.listen(3000, () =&gt; console.log('http://127.0.0.1:3000/profile'));
 }
@@ -466,14 +460,13 @@ return { id: 1 };
   <code>writeHead</code> marks the headers as sent immediately, which prevents
   <code>render()</code> from adding <code>Content-Length</code>:</p>
 
-<pre><code>app.get('/profile', async (req, res, next) =&gt; {
-  try {
-    res.setHeader('content-type', 'text/html; charset=utf-8');   // not res.writeHead(...)
-    await page.render(req, res);
-    res.end();
-  } catch (err) {
-    next(err);
-  }
+<pre><code>// handler sets content-type only if nothing already has.
+app.get('/profile', page.handler);
+
+// Setting your own headers first still works — use setHeader, not writeHead.
+app.get('/no-cache', (req, res, next) =&gt; {
+  res.setHeader('cache-control', 'no-store');
+  page.handler(req, res, next);
 });</code></pre>
 
   <p>If several blocks need the same per-request value, compute it in each — they run concurrently,
@@ -619,15 +612,8 @@ return { name: currentUser };
 
 <pre><code>app.use('/docs', express.static(path.join(__dirname, 'docs')));
 
-app.get('/profile', async (req, res, next) =&gt; {
-  try {
-    res.type('html');
-    await page.render(req, res);
-    res.end();
-  } catch (err) {
-    next(err);
-  }
-});</code></pre>
+// Already an Express handler: renders, ends, and forwards errors to next.
+app.get('/profile', page.handler);</code></pre>
 
   <div class="warn">
     <p><strong>One version-dependent gotcha.</strong> Express 5 auto-forwards rejected promises from
@@ -650,6 +636,14 @@ app.get('/profile', async (req, res, next) =&gt; {
   <div class="sig">await compileSource(input, options?)</div>
   <p>Same, from a string or Buffer. <code>options.filename</code> sets what <code>require</code>,
   <code>__filename</code>, and <code>__dirname</code> resolve against inside the page.</p>
+
+  <div class="sig">page.handler(request, response, next?)</div>
+  <p>A ready-made route handler. Renders the page, ends the response, and forwards any failure
+  to <code>next</code>. Sets <code>content-type: text/html; charset=utf-8</code> only if nothing
+  has set it already.</p>
+<pre><code>app.get(/, page.handler);</code></pre>
+  <p>Called without <code>next</code>, it returns the promise instead, so a vanilla server can
+  handle the failure itself rather than having it swallowed.</p>
 
   <div class="sig">page.render(request, response)</div>
   <p>Streams the page, writing static buffers directly and awaiting <code>'drain'</code> on

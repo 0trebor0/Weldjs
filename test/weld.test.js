@@ -118,6 +118,73 @@ test('nesting at the depth limit still serializes', () => {
   assert.doesNotThrow(() => serialize(root));
 });
 
+function fakeResponse() {
+  const response = new EventEmitter();
+  response.headersSent = false;
+  response.headers = {};
+  response.chunks = [];
+  response.ended = false;
+  response.setHeader = (k, v) => { response.headers[k.toLowerCase()] = v; };
+  response.getHeader = (k) => response.headers[k.toLowerCase()];
+  response.write = (chunk) => { response.chunks.push(Buffer.from(chunk)); return true; };
+  response.end = () => { response.ended = true; };
+  return response;
+}
+
+test('handler renders and ends the response without a wrapper', async () => {
+  const page = await compileSource('<p>a</p><weld var="v">return 1;</weld><p>b</p>');
+  const response = fakeResponse();
+
+  // Called the way Express calls it, with a next that must not fire.
+  let nextCalled = null;
+  page.handler(Object.create(null), response, (error) => { nextCalled = error; });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(nextCalled, null);
+  assert.ok(response.ended, 'handler did not end the response');
+  assert.equal(
+    Buffer.concat(response.chunks).toString(),
+    '<p>a</p><script>const v=1;</script><p>b</p>'
+  );
+});
+
+test('handler defaults content-type to html but does not override one', async () => {
+  const page = await compileSource('<p>a</p>');
+
+  const auto = fakeResponse();
+  page.handler(Object.create(null), auto, () => {});
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(auto.headers['content-type'], 'text/html; charset=utf-8');
+
+  const explicit = fakeResponse();
+  explicit.setHeader('content-type', 'application/xhtml+xml');
+  page.handler(Object.create(null), explicit, () => {});
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(explicit.headers['content-type'], 'application/xhtml+xml');
+});
+
+test('handler forwards failures to next with nothing written', async () => {
+  const page = await compileSource('<p>lead</p><weld var="v">throw new Error("block failed");</weld>');
+  const response = fakeResponse();
+
+  const error = await new Promise((resolve) => {
+    page.handler(Object.create(null), response, resolve);
+  });
+
+  assert.match(error.message, /block failed/);
+  assert.equal(response.chunks.length, 0, 'wrote bytes before failing');
+  assert.equal(response.ended, false, 'ended the response on failure');
+});
+
+test('handler returns a promise when called without next', async () => {
+  const page = await compileSource('<weld var="v">throw new Error("no next here");</weld>');
+  const response = fakeResponse();
+
+  const result = page.handler(Object.create(null), response);
+  assert.ok(result && typeof result.then === 'function', 'did not return a promise');
+  await assert.rejects(() => result, /no next here/);
+});
+
 test('source must be a string or Buffer, with no silent coercion', async () => {
   // Buffer.from() accepts an array and reinterprets its elements as bytes, which
   // would compile nonsense instead of rejecting it.

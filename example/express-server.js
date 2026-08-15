@@ -24,23 +24,18 @@ async function main() {
   // Serve the documentation alongside the app.
   app.use('/docs', express.static(path.join(__dirname, '..', 'docs')));
 
-  app.get('/', async (request, response, next) => {
-    try {
-      // setHeader rather than writeHead: writeHead marks the headers as sent,
-      // which stops render() adding Content-Length once it knows the size.
-      response.setHeader('content-type', 'text/html; charset=utf-8');
-      response.setHeader('cache-control', 'no-store');
+  // page.handler is already an Express handler: it renders, ends the response,
+  // and forwards any failure to the error middleware below. Express's req is
+  // what <weld var> blocks see as `request`, so request.query, request.params
+  // and request.body are all available inside the page.
+  app.get('/', page.handler);
 
-      // Express's req is what <weld var> blocks see as `request`, so
-      // request.query, request.params and request.body are all available.
-      await page.render(request, response);
-      response.end();
-    } catch (error) {
-      // Express 5 forwards rejected promises automatically; Express 4 does not,
-      // and without this the request would hang until it timed out. Passing to
-      // next() works on both.
-      next(error);
-    }
+  // Set your own headers first when you need them; handler only fills in
+  // content-type if nothing has set it. Use setHeader, never writeHead, which
+  // marks headers as sent and stops render() adding Content-Length.
+  app.get('/no-cache', (request, response, next) => {
+    response.setHeader('cache-control', 'no-store');
+    page.handler(request, response, next);
   });
 
   // render() writes nothing unless every block succeeded, so a failure arrives

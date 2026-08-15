@@ -12,6 +12,13 @@
 
 ### Added
 
+- **`page.handler`** — a ready-made route handler, so serving a page no longer requires an async wrapper, a `res.end()` call, or hand-rolled error forwarding:
+
+  ```js
+  app.get('/', page.handler);
+  ```
+
+  It renders, ends the response, and forwards any failure to `next`, which reaches your error middleware with nothing written. It sets `content-type: text/html; charset=utf-8` only if nothing has set one already, so setting your own headers first still works. Called without `next` — a vanilla server — it returns the promise instead of swallowing the failure.
 - `example/express-server.js` — a complete Express example: compile-at-boot, static docs mounted at `/docs`, `setHeader` rather than `writeHead` so `Content-Length` is set, and an error handler that works on both Express 4 and 5. Express is not added as a dependency; install it yourself to run the example.
 
 ### Security

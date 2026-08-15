@@ -221,11 +221,42 @@ async function compileSource(input, options = {}) {
     }
   }
 
+  // A ready-made route handler, so callers do not have to write an async
+  // wrapper, remember response.end(), or hand-roll error forwarding:
+  //
+  //   app.get('/', page.handler);
+  //
+  // Express passes next to every route handler, so failures reach the error
+  // middleware with nothing written. Called without next — a vanilla server —
+  // it returns the promise instead, so the failure is still the caller's to
+  // handle rather than being swallowed.
+  function handler(request, response, next) {
+    if (
+      !response.headersSent &&
+      typeof response.getHeader === 'function' &&
+      response.getHeader('content-type') === undefined
+    ) {
+      response.setHeader('content-type', 'text/html; charset=utf-8');
+    }
+
+    const finished = render(request, response).then(() => {
+      response.end();
+    });
+
+    if (typeof next === 'function') {
+      finished.catch(next);
+      return undefined;
+    }
+
+    return finished;
+  }
+
   // The source buffer is deliberately not retained: nothing after compilation
   // reads it, and holding it would double the memory cost of every page.
   return Object.freeze({
     filename,
     parts: runtimeParts,
+    handler,
     render,
     renderToBuffer
   });

@@ -263,6 +263,33 @@ block failure producing a clean `500` with no truncated page. The Express-specif
 (routing, `express.static`, error middleware) is **not** executed here because the package
 is not installed.
 
+## Tenth pass: page.handler
+
+User feedback: serving a page should not require writing `async`, `await`, `res.end()`, or
+a try/catch in the route. Added `page.handler(request, response, next?)`:
+
+```js
+app.get('/', page.handler);
+```
+
+- Renders, then ends the response.
+- Forwards failures to `next`, which reaches Express's error middleware with nothing
+  written, since render is already atomic.
+- Sets `content-type: text/html; charset=utf-8` only when nothing has set one, so callers
+  can set their own headers first.
+- Without `next`, returns the promise rather than swallowing the failure. Express passes
+  `next` to every route handler, so the Express path always forwards.
+
+Verified over real HTTP without Express (Express's `res` is an `http.ServerResponse`):
+200, `content-type: text/html; charset=utf-8`, `Content-Length: 413`, no chunked encoding,
+response ended. Four tests added covering ending, content-type defaulting and not
+overriding, error forwarding with zero bytes written, and the returned promise.
+
+Three stale Express snippets in `docs/index.html` still showed the old
+`async`/`await`/`res.end()` form and were replaced. The docs now contain no
+`await page.render(req, res)` and no `res.end()` outside a comment describing their
+absence.
+
 ## Assumptions, limitations, remaining risks
 
 - **Serialization is ~35% slower** on large payloads (1.94 ms → 2.61 ms for a 224 KB

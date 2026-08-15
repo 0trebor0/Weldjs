@@ -26,6 +26,7 @@ console.log(users);
 - All non-`<weld>` HTML is retained as slices of the original Buffer.
 - The page is compiled once; normal requests do not rescan or recompile the HTML.
 - `shared(key, factory)` is available inside setup code for resources that should be shared across pages.
+- `page.handler` is a ready-made route handler: `app.get('/', page.handler)` renders, ends the response, and forwards errors to `next`.
 
 ## Documentation
 
