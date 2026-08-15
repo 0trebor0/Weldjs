@@ -48,9 +48,23 @@ function buildRuntimeParts(parsed, handlers) {
   let pending = [];
   let requestIndex = 0;
 
+  // Every run gets a fresh allocation, even a run of one slice. Keeping a single
+  // subarray view would pin the whole original source buffer alive for the life
+  // of the page, so a page would cost its own size twice: once for the source,
+  // once for the merged runs. Copying every run lets the source be collected.
   function flushStatic() {
     if (pending.length === 0) return;
-    const buffer = pending.length === 1 ? pending[0] : Buffer.concat(pending);
+
+    let total = 0;
+    for (const slice of pending) total += slice.length;
+
+    const buffer = Buffer.allocUnsafe(total);
+    let offset = 0;
+    for (const slice of pending) {
+      slice.copy(buffer, offset);
+      offset += slice.length;
+    }
+
     runtimeParts.push({ type: 'html', buffer });
     pending = [];
   }
@@ -67,7 +81,8 @@ function buildRuntimeParts(parsed, handlers) {
     runtimeParts.push({
       type: 'request',
       varName: part.varName,
-      handler: handlers[requestIndex]
+      handler: handlers[requestIndex],
+      valueIndex: requestIndex
     });
     requestIndex += 1;
   }
@@ -101,6 +116,7 @@ async function compileSource(input, options = {}) {
   const runtimeParts = buildRuntimeParts(parsed, handlers);
 
   async function renderToBuffer(request = Object.create(null), response = null) {
+    const values = await resolveValues(request, response);
     const chunks = [];
 
     for (const part of runtimeParts) {
@@ -109,33 +125,90 @@ async function compileSource(input, options = {}) {
         continue;
       }
 
-      const value = await part.handler(request, response);
-      chunks.push(clientScript(part.varName, value));
+      chunks.push(scriptFor(part, values[part.valueIndex]));
     }
 
     return Buffer.concat(chunks);
   }
 
-  async function writeChunk(response, chunk) {
-    if (response.write(chunk)) return;
-    await once(response, 'drain');
-  }
-
-  async function render(request, response) {
-    for (const part of runtimeParts) {
-      if (part.type === 'html') {
-        await writeChunk(response, part.buffer);
-        continue;
-      }
-
-      const value = await part.handler(request, response);
-      await writeChunk(response, clientScript(part.varName, value));
+  // The serializer reports a path within the value ("$.rows[2]"), which is not
+  // enough to locate the block on a page with many of them.
+  function scriptFor(part, value) {
+    try {
+      return clientScript(part.varName, value);
+    } catch (error) {
+      throw new TypeError(
+        `<weld var="${part.varName}"> in ${filename}: ${error.message}`,
+        { cause: error }
+      );
     }
   }
 
+  // Runs every request block concurrently. Blocks are independent by design —
+  // anything shared between them would have to live in setup scope, which is
+  // shared across requests and therefore already unsafe — so there is nothing to
+  // sequence. Total time becomes the slowest block rather than the sum.
+  function resolveValues(request, response) {
+    const pending = [];
+
+    for (const part of runtimeParts) {
+      if (part.type !== 'request') continue;
+      const result = part.handler(request, response);
+      // Promise.all settles on the first rejection while the rest keep running;
+      // without a catch of their own, a later failure would surface as an
+      // unhandled rejection and take the process down.
+      if (result && typeof result.catch === 'function') result.catch(() => {});
+      pending.push(result);
+    }
+
+    return Promise.all(pending);
+  }
+
+  // Resolve everything, then emit. Nothing is written until the whole response
+  // is known to succeed, so a failing block yields a clean error instead of a
+  // truncated page under an already-sent 200.
+  async function render(request, response) {
+    const values = await resolveValues(request, response);
+
+    const chunks = [];
+    let total = 0;
+
+    for (const part of runtimeParts) {
+      const chunk = part.type === 'html'
+        ? part.buffer
+        : scriptFor(part, values[part.valueIndex]);
+
+      chunks.push(chunk);
+      total += chunk.length;
+    }
+
+    // The exact length is known before anything is sent, so the response can
+    // carry Content-Length instead of falling back to chunked encoding.
+    if (!response.headersSent && typeof response.setHeader === 'function') {
+      response.setHeader('Content-Length', total);
+    }
+
+    // Coalesce the writes into as few packets as the socket allows without
+    // concatenating the page into one buffer.
+    if (typeof response.cork === 'function') response.cork();
+
+    try {
+      for (const chunk of chunks) {
+        if (!response.write(chunk)) {
+          if (typeof response.uncork === 'function') response.uncork();
+          await once(response, 'drain');
+          if (typeof response.cork === 'function') response.cork();
+        }
+      }
+    } finally {
+      if (typeof response.uncork === 'function') response.uncork();
+    }
+  }
+
+  // The source buffer is deliberately not retained: nothing after compilation
+  // reads it, and holding it would double the memory cost of every page.
   return Object.freeze({
     filename,
-    source: parsed.source,
     parts: runtimeParts,
     render,
     renderToBuffer

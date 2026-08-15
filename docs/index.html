@@ -454,25 +454,21 @@ return { id };
   explicitly, since that signature is <code>renderToBuffer(request, response = null)</code>. A handler
   that touches <code>response</code> unconditionally will throw there.</p>
 
-  <p><strong>Headers usually cannot be set from a block.</strong> <code>render()</code> streams, and
-  the leading static HTML is written <em>before</em> the first handler runs — so by the time your code
-  executes, headers are already sent:</p>
+  <p><strong>Headers can be set from a block</strong>, because blocks all run in phase one, before
+  anything is written:</p>
 
-  <table>
-    <thead><tr><th>Page shape</th><th><code>response.setHeader()</code> in the block</th></tr></thead>
-    <tbody>
-      <tr><td><code>&lt;weld var&gt;</code> first, no HTML before it</td><td>works — nothing written yet</td></tr>
-      <tr><td>any HTML before the block</td><td><code>ERR_HTTP_HEADERS_SENT</code></td></tr>
-    </tbody>
-  </table>
+<pre><code>&lt;weld var="profile"&gt;
+response.setHeader('cache-control', 'no-store');   // fine — nothing written yet
+return { id: 1 };
+&lt;/weld&gt;</code></pre>
 
-  <p>Since that depends on where the block sits in the file, do status and header work in the route
-  instead, where it is unconditional:</p>
+  <p>Use <code>setHeader</code> rather than <code>writeHead</code> in your route.
+  <code>writeHead</code> marks the headers as sent immediately, which prevents
+  <code>render()</code> from adding <code>Content-Length</code>:</p>
 
 <pre><code>app.get('/profile', async (req, res, next) =&gt; {
   try {
-    res.type('html');
-    res.setHeader('cache-control', 'no-store');   // here, not in a block
+    res.setHeader('content-type', 'text/html; charset=utf-8');   // not res.writeHead(...)
     await page.render(req, res);
     res.end();
   } catch (err) {
@@ -480,9 +476,9 @@ return { id };
   }
 });</code></pre>
 
-  <p>Treat <code>response</code> inside a block as read-mostly. If you need per-request setup shared by
-  several blocks, compute it in the first <code>var</code> block and return it — do not stash it in
-  setup scope (<a href="#isolation">why</a>).</p>
+  <p>If several blocks need the same per-request value, compute it in each — they run concurrently,
+  so there is no ordering between them, and stashing it in setup scope would leak across users
+  (<a href="#isolation">why</a>).</p>
 </section>
 
 <section id="lifecycle">
@@ -498,15 +494,35 @@ return { id };
   <p>Nothing is re-scanned or re-parsed per request.</p>
 
   <h3>What a request does</h3>
-  <p>For a page shaped <code>HTML &lt;weld&gt; HTML &lt;weld var="x"&gt; HTML</code>:</p>
+  <p><code>render()</code> works in two phases.</p>
   <ol>
-    <li>Write the merged buffer for the leading HTML.</li>
-    <li>Call the handler for <code>x</code>.</li>
-    <li>Serialize the result and write <code>&lt;script&gt;const x=…;&lt;/script&gt;</code>.</li>
-    <li>Write the trailing buffer.</li>
+    <li><strong>Resolve.</strong> Every <code>var</code> block runs <em>concurrently</em>. Nothing is
+      written yet.</li>
+    <li><strong>Emit.</strong> Each value is serialized, the total byte length is computed and set as
+      <code>Content-Length</code>, and the parts are written in document order.</li>
   </ol>
-  <p>Only steps 2 and 3 do per-request work. Steps 1 and 4 write buffers computed at load time,
-  which is why a 70 KB page renders in roughly 30 microseconds.</p>
+
+  <p>Blocks run concurrently because they are independent by construction: anything shared between
+  them would have to live in setup scope, which is shared across requests and therefore already
+  unsafe. Total time is the <strong>slowest</strong> block rather than the sum:</p>
+
+  <table>
+    <thead><tr><th>Page with 3 blocks, ~10 ms each</th><th>Time</th></tr></thead>
+    <tbody>
+      <tr><td>sequential</td><td>42.9 ms</td></tr>
+      <tr><td>concurrent (current)</td><td><strong>14.4 ms</strong></td></tr>
+    </tbody>
+  </table>
+
+  <div class="ok">
+    <p><strong>Nothing is sent until the whole response is known to succeed.</strong> A block that
+    throws — or returns a value that cannot be exported — fails with zero bytes written, so the
+    caller can still send a real error status. The response goes out complete, with
+    <code>Content-Length</code> rather than chunked encoding.</p>
+  </div>
+
+  <p>Static parts are buffers computed at load time, so emitting is a few microseconds. The
+  per-request cost is dominated by whatever your blocks actually do.</p>
 </section>
 
 <section id="isolation">
@@ -603,14 +619,12 @@ app.get('/profile', async (req, res, next) =&gt; {
 });</code></pre>
 
   <div class="warn">
-    <p><strong>Two version-dependent gotchas.</strong> Express 5 auto-forwards rejected promises from
+    <p><strong>One version-dependent gotcha.</strong> Express 5 auto-forwards rejected promises from
     async handlers; <strong>Express 4 does not</strong> — an async handler that throws without an
     explicit <code>try/catch … next(err)</code> leaves the request hanging until timeout. The snippet
     above is safe on both.</p>
-    <p>Because <code>render()</code> streams, a handler that throws after the first write has already
-    sent bytes. Express's error handler will then attempt <code>res.status(500)</code> and produce
-    <code>ERR_HTTP_HEADERS_SENT</code> on top of a truncated page. Use
-    <code>renderToBuffer()</code> if you need failures to stay atomic.</p>
+    <p>Failures are atomic, so <code>next(err)</code> reaches Express's error handler with nothing
+    yet written and it can send a real 500.</p>
   </div>
 </section>
 
@@ -631,12 +645,16 @@ app.get('/profile', async (req, res, next) =&gt; {
   backpressure. <code>request</code> is passed to every handler.</p>
 
   <div class="sig">await page.renderToBuffer(request?, response?)</div>
-  <p>Renders to a single Buffer instead of streaming. Slower for large pages, but a handler failure
-  leaves nothing partially sent.</p>
+  <p>Renders to a single Buffer. Also resolves blocks concurrently, but copies the whole page, which
+  measured about 16x more per-request overhead than <code>render()</code>. Use it when you need the
+  bytes rather than a response.
 
-  <div class="sig">page.filename &middot; page.source &middot; page.parts</div>
-  <p>The resolved path, the original source Buffer, and the compiled part list
+  <div class="sig">page.filename &middot; page.parts</div>
+  <p>The resolved path and the compiled part list
   (<code>{ type: 'html', buffer }</code> and <code>{ type: 'request', varName, handler }</code>).</p>
+  <p class="muted">The original source Buffer is not retained. Each static run is copied into its
+  own allocation at compile time so the source can be collected — holding it would make every page
+  cost its own size twice, which matters once an app has hundreds of pages.</p>
 
   <div class="sig">await shared(key, factory)</div>
   <p>Process-wide resource cache. The factory runs once per key; concurrent callers receive the same
@@ -657,7 +675,11 @@ app.get('/profile', async (req, res, next) =&gt; {
   <p>Scan-time problems throw <code>WeldSyntaxError</code> (a <code>SyntaxError</code>) carrying a
   byte <code>offset</code>. Because compilation happens at startup, a malformed page stops the server
   at boot instead of failing under traffic.</p>
-  <p>Export problems throw <code>TypeError</code> at render time, from the request that caused them.</p>
+  <p>Export problems throw <code>TypeError</code> at render time, from the request that caused them.
+  The message names the block and the page, and the original error is kept as
+  <code>error.cause</code>:</p>
+
+<pre><code>&lt;weld var="beta"&gt; in /app/views/profile.html: Cannot export function at $.handler</code></pre>
 </section>
 
 <section id="security">
@@ -718,8 +740,8 @@ emitted: &lt;script&gt;const v="require(\"fs\"); doSomething();";&lt;/script&gt;
     <li>Nested <code>&lt;weld&gt;</code> blocks are rejected.</li>
     <li><code>var</code> is the only supported attribute.</li>
     <li>No router, hot reload, body parser, sessions, or database abstraction.</li>
-    <li><code>render()</code> streams, so a handler that throws after the first write leaves a
-      truncated page under an already-sent 200. <code>renderToBuffer()</code> does not.</li>
+    <li><code>renderToBuffer()</code> copies the whole page into one buffer; <code>render()</code>
+      writes the static buffers directly and is about 16x cheaper per request.</li>
     <li>There is no size cap on an exported value; only depth is bounded.</li>
   </ul>
 </section>

@@ -9,10 +9,10 @@ async function main() {
 
   const server = http.createServer(async (request, response) => {
     try {
-      response.writeHead(200, {
-        'content-type': 'text/html; charset=utf-8',
-        'cache-control': 'no-store'
-      });
+      // setHeader rather than writeHead: writeHead marks the headers as sent, and
+      // render() adds Content-Length once it knows the finished size.
+      response.setHeader('content-type', 'text/html; charset=utf-8');
+      response.setHeader('cache-control', 'no-store');
 
       await page.render(request, response);
       response.end();

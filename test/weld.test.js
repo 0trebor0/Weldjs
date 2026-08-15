@@ -156,6 +156,118 @@ test('render and renderToBuffer produce identical bytes', async () => {
   assert.deepEqual(Buffer.concat(chunks), await page.renderToBuffer());
 });
 
+test('request blocks run concurrently, not one after another', async () => {
+  const page = await compileSource(`
+<weld var="a">await new Promise((r) => setTimeout(r, 40)); return 1;</weld>
+<weld var="b">await new Promise((r) => setTimeout(r, 40)); return 2;</weld>
+<weld var="c">await new Promise((r) => setTimeout(r, 40)); return 3;</weld>
+`);
+
+  const start = Date.now();
+  const output = (await page.renderToBuffer()).toString();
+  const elapsed = Date.now() - start;
+
+  assert.match(output, /const a=1;/);
+  assert.match(output, /const b=2;/);
+  assert.match(output, /const c=3;/);
+  // Sequential would be ~120ms; concurrent is ~40ms. 100ms separates them safely.
+  assert.ok(elapsed < 100, `blocks appear to run sequentially (${elapsed}ms for 3x40ms)`);
+});
+
+test('a failing block sends nothing at all', async () => {
+  const page = await compileSource(
+    '<p>leading html</p><weld var="ok">return 1;</weld><weld var="bad">throw new Error("query failed");</weld>'
+  );
+
+  const written = [];
+  const response = new EventEmitter();
+  response.headersSent = false;
+  response.write = (chunk) => { written.push(chunk); return true; };
+  response.setHeader = () => {};
+
+  await assert.rejects(() => page.render(Object.create(null), response), /query failed/);
+  assert.equal(written.length, 0, 'bytes were written before the failure was known');
+});
+
+test('render sets Content-Length for the finished response', async () => {
+  const page = await compileSource('<p>a</p><weld var="v">return { n: 1 };</weld><p>b</p>');
+
+  const headers = {};
+  const response = new EventEmitter();
+  response.headersSent = false;
+  response.setHeader = (k, v) => { headers[k] = v; };
+  response.write = () => true;
+
+  await page.render(Object.create(null), response);
+
+  const expected = (await page.renderToBuffer()).length;
+  assert.equal(headers['Content-Length'], expected);
+});
+
+test('Content-Length counts bytes, not characters', async () => {
+  const page = await compileSource('<p>café 日本語 🎉</p><weld var="v">return "日本語";</weld>');
+
+  const headers = {};
+  const chunks = [];
+  const response = new EventEmitter();
+  response.headersSent = false;
+  response.setHeader = (k, v) => { headers[k] = v; };
+  response.write = (chunk) => { chunks.push(Buffer.from(chunk)); return true; };
+
+  await page.render(Object.create(null), response);
+
+  const body = Buffer.concat(chunks);
+  assert.equal(headers['Content-Length'], body.length);
+  assert.notEqual(body.length, body.toString().length, 'page has no multibyte content to test');
+});
+
+test('a slow failing block does not escape as an unhandled rejection', async () => {
+  const page = await compileSource(`
+<weld var="fast">throw new Error('fast fail');</weld>
+<weld var="slow">await new Promise((r) => setTimeout(r, 30)); throw new Error('slow fail');</weld>
+`);
+
+  let unhandled = null;
+  const listener = (error) => { unhandled = error; };
+  process.on('unhandledRejection', listener);
+
+  try {
+    await assert.rejects(() => page.renderToBuffer(), /fast fail/);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+  } finally {
+    process.off('unhandledRejection', listener);
+  }
+
+  assert.equal(unhandled, null, `unhandled rejection escaped: ${unhandled && unhandled.message}`);
+});
+
+test('render does not set headers once they are already sent', async () => {
+  const page = await compileSource('<p>a</p><weld var="v">return 1;</weld>');
+
+  const response = new EventEmitter();
+  response.headersSent = true;
+  response.setHeader = () => { throw new Error('ERR_HTTP_HEADERS_SENT'); };
+  response.write = () => true;
+
+  await assert.doesNotReject(() => page.render(Object.create(null), response));
+});
+
+test('export errors identify the block that produced them', async () => {
+  const page = await compileSource(
+    '<weld var="alpha">return 1;</weld><weld var="beta">return () => 1;</weld>',
+    { filename: '/tmp/pages/profile.html' }
+  );
+
+  await assert.rejects(() => page.renderToBuffer(), (error) => {
+    assert.ok(error instanceof TypeError, `expected TypeError, got ${error.constructor.name}`);
+    assert.match(error.message, /var="beta"/);
+    assert.match(error.message, /profile\.html/);
+    assert.match(error.message, /Cannot export function/);
+    assert.ok(error.cause instanceof TypeError, 'original error not kept as cause');
+    return true;
+  });
+});
+
 test('duplicate client variable names are rejected at compile time', async () => {
   await assert.rejects(
     () => compileSource('<weld var="x">return 1;</weld><weld var="x">return 2;</weld>'),
