@@ -1683,3 +1683,351 @@ const name = path.basename(__filename);
   const output = (await page.renderToBuffer()).toString();
   assert.match(output, /const filename="page.html"/);
 });
+
+// --- exact export-size enforcement -------------------------------------------
+
+// `<script>const v=` and `;</script>` around the serialized value, plus its two
+// quotes. The limit is defined against the whole emitted element, so a test that
+// aims at an exact byte count has to include them.
+const SCRIPT_OVERHEAD = '<script>const v=;</script>'.length + 2;
+
+function stringPage(source, limit) {
+  return compileSource(`<weld var="v">return ${source};</weld>`, { maxExportBytes: limit });
+}
+
+test('a payload landing exactly on the limit is accepted', async () => {
+  const limit = 2048;
+  const page = await stringPage(`"x".repeat(${limit - SCRIPT_OVERHEAD})`, limit);
+
+  const output = await page.renderToBuffer();
+  assert.equal(Buffer.byteLength(output, 'utf8'), limit,
+    'the test did not actually produce a payload of exactly the limit');
+});
+
+test('a payload one byte over the limit is rejected', async () => {
+  const limit = 2048;
+  const page = await stringPage(`"x".repeat(${limit - SCRIPT_OVERHEAD + 1})`, limit);
+
+  await assert.rejects(() => page.renderToBuffer(), /Cannot export more than 2048 bytes per page/);
+});
+
+test('characters that expand when escaped are counted after escaping', async () => {
+  // The bug this covers: `<` is one JavaScript character but six bytes once
+  // escaped to <, so a pre-escape measurement passes a payload six times
+  // the limit. Same for `>` and `&`.
+  for (const char of ['<', '>', '&']) {
+    const page = await stringPage(`"${char}".repeat(300000)`, MAX_EXPORT_BYTES);
+
+    await assert.rejects(
+      () => page.renderToBuffer(),
+      /Cannot export more than 1048576 bytes per page; the emitted <script> payload reached \d+ bytes/,
+      `a page of 300000 "${char}" characters was accepted`
+    );
+  }
+});
+
+test('multi-byte characters are counted as UTF-8 bytes, not code units', async () => {
+  // 400000 code units, comfortably under a 1 MiB character budget, but 1.2 MB
+  // of UTF-8. Neither character is escaped, so this is purely the encoding.
+  for (const [label, char, repeat] of [['three-byte', '€', 400000], ['astral', '\u{1f600}', 300000]]) {
+    const page = await stringPage(`"${char}".repeat(${repeat})`, MAX_EXPORT_BYTES);
+
+    await assert.rejects(
+      () => page.renderToBuffer(),
+      /the emitted <script> payload reached \d+ bytes/,
+      `a ${label} payload over the limit was accepted`
+    );
+  }
+});
+
+test('an escape-heavy payload that still fits is accepted', async () => {
+  // The counterpart to the rejection tests: the exact measurement must not
+  // reject something that genuinely fits once escaped.
+  const page = await stringPage('"<".repeat(1000)', MAX_EXPORT_BYTES);
+
+  const output = (await page.renderToBuffer()).toString();
+  assert.ok(output.includes('\\u003c'.repeat(10)), 'the payload was not escaped as expected');
+  assert.ok(!output.includes('<script>const v="<'), 'a raw < reached the page');
+});
+
+test('the script wrapper and the nonce count towards the limit', async () => {
+  // The documented limit covers the whole emitted element, so the same data can
+  // fit without a nonce and not fit with one.
+  const limit = 2048;
+  const page = await stringPage(`"x".repeat(${limit - SCRIPT_OVERHEAD})`, limit);
+
+  await assert.doesNotReject(() => page.renderToBuffer());
+
+  const nonce = 'YWJjZGVmZ2hpamts';
+  await assert.rejects(
+    () => page.renderToBuffer({}, { locals: { cspNonce: nonce } }),
+    /Cannot export more than 2048 bytes per page/,
+    'the nonce attribute was not charged against the limit'
+  );
+});
+
+test('the exact byte check reports the limit and the size reached', async () => {
+  const page = await stringPage('"<".repeat(1000)', 4096);
+
+  await assert.rejects(() => page.renderToBuffer(), (error) => {
+    assert.ok(error instanceof TypeError);
+    assert.match(error.message, /<weld var="v">/, 'the failing block was not named');
+    assert.match(error.message, /Cannot export more than 4096 bytes per page/);
+    assert.match(error.message, /the emitted <script> payload reached 6\d{3} bytes/);
+    return true;
+  });
+});
+
+test('serialize enforces the byte limit on its own output', async () => {
+  // Reached through the walk's lower bound, this string is 1000002 characters
+  // and passes; escaped it is six times that.
+  assert.throws(
+    () => serialize('&'.repeat(300000)),
+    /Cannot export more than 1048576 bytes per page; the emitted <script> payload reached 1800002 bytes/
+  );
+});
+
+test('an escape-heavy payload split across blocks is caught by the shared budget', async () => {
+  const page = await compileSource(
+    ['a', 'b', 'c'].map((n) => `<weld var="${n}">return "<".repeat(100000);</weld>`).join('')
+  );
+
+  // 100000 characters per block passes the walk's floor three times over, but
+  // 600002 bytes each is over the limit by the second block.
+  await assert.rejects(
+    () => page.renderToBuffer(),
+    /the emitted <script> payload reached \d+ bytes/
+  );
+});
+
+test('a deeply referenced structure is still measured exactly', async () => {
+  // Repeated references are not circular, so they are expanded once each and the
+  // output is far larger than the object graph in memory.
+  const page = await compileSource(`
+<weld var="v">
+const leaf = { text: "&".repeat(2000) };
+const branch = { a: leaf, b: leaf, c: leaf, d: leaf };
+return { w: branch, x: branch, y: branch, z: branch };
+</weld>
+`);
+
+  // 16 copies of a 2000-character string, each escaping to six bytes: 192 KB,
+  // which fits. The point is that it is measured as emitted, not as referenced.
+  const output = await page.renderToBuffer();
+  assert.ok(Buffer.byteLength(output, 'utf8') > 190000);
+  await assert.rejects(
+    () => compileSource(`
+<weld var="v">
+const leaf = { text: "&".repeat(2000) };
+const branch = { a: leaf, b: leaf, c: leaf, d: leaf };
+return { w: branch, x: branch, y: branch, z: branch };
+</weld>
+`, { maxExportBytes: 100000 }).then((p) => p.renderToBuffer()),
+    /Cannot export more than 100000 bytes per page/
+  );
+});
+
+// --- watcher dependency tracking ---------------------------------------------
+
+// Waits out the 20 ms debounce plus the recompile. Generous, because these tests
+// depend on filesystem events, which are not instant on any platform.
+function settle(ms = 300) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+test('watch called immediately after load still tracks includes', async () => {
+  const dir = fsMod.mkdtempSync(path.join(os.tmpdir(), 'weld-watch-immediate-'));
+  const partial = path.join(dir, 'partial.html');
+  const target = path.join(dir, 'page.html');
+
+  fsMod.writeFileSync(partial, '<header>one</header>');
+  fsMod.writeFileSync(target, '<weld src="partial.html"></weld><weld var="v">return 1;</weld>');
+
+  // The documented usage: no await between the two calls, so page.dependencies
+  // is still empty when watch() runs.
+  const page = load(target);
+  const watcher = watch(page);
+
+  try {
+    assert.deepEqual(page.dependencies, [], 'the test did not exercise the pre-compile case');
+
+    await page.ready;
+    await settle(50);                       // let the reconcile microtask run
+
+    assert.deepEqual([...watcher.files].sort(), [partial, target].sort());
+
+    fsMod.writeFileSync(partial, '<header>two</header>');
+    await settle();
+
+    assert.match((await page.renderToBuffer()).toString(), /<header>two<\/header>/);
+  } finally {
+    watcher.close();
+    fsMod.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an include added after startup becomes watched', async () => {
+  const dir = fsMod.mkdtempSync(path.join(os.tmpdir(), 'weld-watch-added-'));
+  const partial = path.join(dir, 'later.html');
+  const target = path.join(dir, 'page.html');
+
+  fsMod.writeFileSync(partial, '<footer>first</footer>');
+  fsMod.writeFileSync(target, '<weld var="v">return 1;</weld>');
+
+  const page = load(target);
+  await page.ready;
+
+  const watcher = watch(page);
+  try {
+    assert.deepEqual([...watcher.files], [target], 'nothing should be included yet');
+
+    // Editing the page to pull in a partial it did not previously use.
+    fsMod.writeFileSync(target, '<weld src="later.html"></weld><weld var="v">return 1;</weld>');
+    await settle();
+
+    assert.deepEqual([...watcher.files].sort(), [partial, target].sort(),
+      'the newly included file was not picked up');
+
+    // The real point: editing that partial now rebuilds the page.
+    fsMod.writeFileSync(partial, '<footer>second</footer>');
+    await settle();
+
+    assert.match((await page.renderToBuffer()).toString(), /<footer>second<\/footer>/);
+  } finally {
+    watcher.close();
+    fsMod.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an include removed after startup stops being watched', async () => {
+  const dir = fsMod.mkdtempSync(path.join(os.tmpdir(), 'weld-watch-removed-'));
+  const partial = path.join(dir, 'dropped.html');
+  const target = path.join(dir, 'page.html');
+
+  fsMod.writeFileSync(partial, '<aside>kept</aside>');
+  fsMod.writeFileSync(target, '<weld src="dropped.html"></weld><weld var="v">return 1;</weld>');
+
+  const page = load(target);
+  await page.ready;
+
+  const watcher = watch(page);
+  try {
+    assert.equal(watcher.files.length, 2);
+
+    fsMod.writeFileSync(target, '<weld var="v">return 1;</weld>');
+    await settle();
+
+    assert.deepEqual([...watcher.files], [target], 'the dropped include is still watched');
+
+    // And it no longer triggers a rebuild: the page must stay as it is.
+    const before = (await page.renderToBuffer()).toString();
+    fsMod.writeFileSync(partial, '<aside>changed</aside>');
+    await settle();
+
+    assert.equal((await page.renderToBuffer()).toString(), before,
+      'a file that is no longer included still rebuilt the page');
+  } finally {
+    watcher.close();
+    fsMod.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('repeated rebuilds do not accumulate watchers for the same file', async () => {
+  const dir = fsMod.mkdtempSync(path.join(os.tmpdir(), 'weld-watch-leak-'));
+  const partial = path.join(dir, 'partial.html');
+  const target = path.join(dir, 'page.html');
+
+  fsMod.writeFileSync(partial, '<header>0</header>');
+  fsMod.writeFileSync(target, '<weld src="partial.html"></weld><weld var="v">return 1;</weld>');
+
+  const page = load(target);
+  await page.ready;
+
+  const opened = [];
+  const realWatch = fsMod.watch;
+  fsMod.watch = (...args) => {
+    const handle = realWatch(...args);
+    opened.push(handle);
+    return handle;
+  };
+
+  let watcher;
+  try {
+    watcher = watch(page);
+
+    for (let i = 1; i <= 4; i += 1) {
+      fsMod.writeFileSync(partial, '<header>' + i + '</header>');
+      await settle();
+    }
+  } finally {
+    fsMod.watch = realWatch;
+  }
+
+  try {
+    assert.match((await page.renderToBuffer()).toString(), /<header>4<\/header>/);
+    assert.equal(watcher.files.length, 2, 'the watched set grew across rebuilds');
+    // Reconciliation must reuse the handles it already holds rather than
+    // opening a fresh one for the same path on every rebuild.
+    assert.equal(opened.length, 2, 'opened ' + opened.length + ' handles for 2 files');
+  } finally {
+    watcher.close();
+    fsMod.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('close stops rebuilds for includes as well as the page', async () => {
+  const dir = fsMod.mkdtempSync(path.join(os.tmpdir(), 'weld-watch-closeall-'));
+  const partial = path.join(dir, 'partial.html');
+  const target = path.join(dir, 'page.html');
+
+  fsMod.writeFileSync(partial, '<header>one</header>');
+  fsMod.writeFileSync(target, '<weld src="partial.html"></weld><weld var="v">return 1;</weld>');
+
+  const page = load(target);
+  await page.ready;
+
+  const watcher = watch(page);
+  await settle(50);
+  assert.equal(watcher.files.length, 2);
+  watcher.close();
+
+  try {
+    fsMod.writeFileSync(partial, '<header>two</header>');
+    fsMod.writeFileSync(target, '<weld src="partial.html"></weld><weld var="v">return 2;</weld>');
+    await settle();
+
+    const output = (await page.renderToBuffer()).toString();
+    assert.match(output, /<header>one<\/header>/, 'an include rebuilt the page after close');
+    assert.match(output, /const v=1;/, 'the page rebuilt after close');
+  } finally {
+    fsMod.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an explicit dependency list is not overwritten by reconciliation', async () => {
+  const dir = fsMod.mkdtempSync(path.join(os.tmpdir(), 'weld-watch-pinned-'));
+  const partial = path.join(dir, 'partial.html');
+  const extra = path.join(dir, 'data.json');
+  const target = path.join(dir, 'page.html');
+
+  fsMod.writeFileSync(partial, '<header>one</header>');
+  fsMod.writeFileSync(extra, '{}');
+  fsMod.writeFileSync(target, '<weld src="partial.html"></weld><weld var="v">return 1;</weld>');
+
+  const page = load(target);
+  await page.ready;
+
+  const watcher = watch(page, { dependencies: [extra] });
+  try {
+    // A pinned list means exactly that list: the include is not added to it.
+    await settle(50);
+    assert.deepEqual([...watcher.files].sort(), [extra, target].sort());
+
+    fsMod.writeFileSync(extra, '{"a":1}');
+    await settle();
+    assert.match((await page.renderToBuffer()).toString(), /const v=1;/);
+  } finally {
+    watcher.close();
+    fsMod.rmSync(dir, { recursive: true, force: true });
+  }
+});
