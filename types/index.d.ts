@@ -29,7 +29,11 @@ export type Part = HtmlPart | RequestPart;
 export interface CompileOptions {
   /** Path the page is treated as living at; sets what `require` resolves against. */
   filename?: string;
-  /** Total serialized bytes one render may produce. Defaults to 1 MiB. */
+  /**
+   * Bytes of emitted `<script>` payload one render may produce, in UTF-8, summed
+   * across every block on the page. Tags, variable name and nonce are included.
+   * Must be an integer of at least 1024. Defaults to 1 MiB.
+   */
   maxExportBytes?: number;
   /** Set false to silence the shared-setup-scope warning. */
   warnOnMutableSetup?: boolean;
@@ -54,7 +58,13 @@ export interface Page {
   renderToBuffer(request?: unknown, response?: unknown): Promise<Buffer>;
 }
 
-export interface LoadedPage extends Page {
+// `parts` is widened rather than inherited: on a loaded page it is undefined
+// until the first compile finishes, which a narrowing redeclaration cannot say.
+export interface LoadedPage extends Omit<Page, 'parts'> {
+  /** `[]` until the first compile finishes. Await `ready` before reading it. */
+  readonly dependencies: readonly string[];
+  /** `undefined` until the first compile finishes. */
+  readonly parts: readonly Part[] | undefined;
   /** The compile promise. Reading it after a failure starts a fresh attempt. */
   readonly ready: Promise<Page>;
   /** Drops the compiled page so the next use rebuilds from disk. */
@@ -63,12 +73,16 @@ export interface LoadedPage extends Page {
 
 export interface WatchOptions {
   onChange?: (page: LoadedPage) => void;
-  /** Extra files to watch. Defaults to the page's `<weld src>` dependencies. */
+  /**
+   * Pins the watched set to exactly these files plus the page itself. Omit it to
+   * track the page's `<weld src>` dependencies, reconciled after every rebuild.
+   */
   dependencies?: string[];
 }
 
 export interface Watcher {
   readonly page: LoadedPage;
+  /** Live: changes as includes are added and removed. */
   readonly files: readonly string[];
   close(): void;
 }
@@ -93,7 +107,10 @@ export interface ScannedPart {
 }
 
 export interface Budget {
-  used: number;
+  /** Lower bound spent during the walk, before the value has been serialized. */
+  floor: number;
+  /** Actual emitted UTF-8 bytes; the counter the limit is defined against. */
+  bytes: number;
   limit: number;
 }
 
@@ -109,7 +126,11 @@ export declare function load(filename: string): LoadedPage;
 /** Empties the page cache and stops any watchers. */
 export declare function clearLoaded(): void;
 
-/** Recompiles a page when its file, or a file it includes, changes. */
+/**
+ * Recompiles a page when its file, or a file it includes, changes. The watched
+ * set is reconciled against the page's includes after the initial compile and
+ * after every rebuild, so this may be called immediately after `load()`.
+ */
 export declare function watch(page: LoadedPage, options?: WatchOptions): Watcher;
 
 /** Maps a directory of .html files to routes, resolved once at startup. */

@@ -526,9 +526,55 @@ app.get('/no-cache', (req, res, next) =&gt; {
     <code>var</code> block. Setup scope is only for things identical for every user.</p>
   </div>
 
-  <p>Setup scope is one closure shared by every request for the process lifetime. Writing request
-  data into it leaks across users. This is invisible in single-user testing — you need concurrency
-  <em>and</em> an <code>await</code> to see it.</p>
+  <h3>The lifecycle</h3>
+
+  <p>A setup block runs <strong>once</strong>, when the page is compiled, and its declarations
+  live in one closure that every subsequent request shares for the life of the process. It is
+  process-shared state, not per-request state. Writing request data into it leaks across users.
+  This is invisible in single-user testing — you need concurrency <em>and</em> an
+  <code>await</code> to see it.</p>
+
+  <p>That makes setup scope right for exactly three things:</p>
+
+  <ul>
+    <li><strong>Immutable configuration</strong> — values read once and never written.</li>
+    <li><strong>Shared service or client instances</strong> — a database handle, an HTTP client,
+      a prepared statement. Created once, used by everyone, deliberately.</li>
+    <li><strong>Caches and resources you intend to share</strong> — where every user seeing the
+      same entry is the goal rather than an accident.</li>
+  </ul>
+
+  <p>Anything else — anything whose correct value depends on <em>which</em> request is being
+  served — belongs in a <code>var</code> block.</p>
+
+  <div class="warn">
+    <p><strong><code>const</code> is not a safety boundary.</strong> The compile-time warning
+    flags top-level <code>let</code> and <code>var</code> in setup blocks, because a reassignable
+    binding is the cheapest signal of a leak. It is a heuristic and nothing more. A
+    <code>const</code> binding cannot be reassigned, but its <em>contents</em> can still be
+    mutated, and a mutated shared object leaks in exactly the same way:</p>
+<pre><code>&lt;weld&gt;
+const seenUsers = [];          // const, no warning, still shared by everyone
+&lt;/weld&gt;
+&lt;weld var="page"&gt;
+seenUsers.push(request.query.user);   // every user's name, visible to every user
+return { seen: seenUsers };
+&lt;/weld&gt;</code></pre>
+    <p>Silence from the warning means only that no reassignable binding was found. It is not a
+    statement that the page is request-safe.</p>
+  </div>
+
+  <p>The safe version of the same shape keeps the per-request value local, and keeps in setup
+  only the thing that really is identical for everyone:</p>
+
+<pre><code>&lt;weld&gt;
+const db = await shared('db', () =&gt; openDatabase());   // one handle, deliberately shared
+&lt;/weld&gt;
+&lt;weld var="page"&gt;
+const user = request.query.user;              // local to this invocation
+const rows = await db.recentFor(user);
+return { user, rows };
+&lt;/weld&gt;</code></pre>
 
   <div class="bad">
     <p><strong>Wrong.</strong> <code>currentUser</code> is shared by every request.</p>
@@ -579,19 +625,46 @@ return { name: currentUser };
       <tr><td><code>Date</code>, <code>Map</code>, <code>Set</code>, class instances</td><td>non-plain objects; return <code>date.toISOString()</code> instead</td></tr>
       <tr><td>a <code>__proto__</code> key</td><td>would set the prototype of the client object</td></tr>
       <tr><td>nesting deeper than 64 levels</td><td>bounded to prevent stack exhaustion</td></tr>
-      <tr><td>more than 1 MB in one export</td><td>bounded so an unbounded query cannot be serialized into the page</td></tr>
+      <tr><td>more than 1 MiB per render</td><td>bounded so an unbounded query cannot be serialized into the page</td></tr>
     </tbody>
   </table>
 
-  <p>The size budget is spent as the value is walked, so an oversized result fails as soon as the
-  limit is crossed rather than after the whole structure has been copied. The error names the path
+  <h3>What the size limit measures</h3>
+
+  <p><strong>The limit is 1 MiB (1,048,576 bytes) of emitted <code>&lt;script&gt;</code> payload,
+  measured in UTF-8 bytes, summed across every block on the page, per render.</strong> Three parts
+  of that are worth stating separately:</p>
+
+  <ul>
+    <li><strong>The whole element counts</strong>, not just the JSON: the
+      <code>&lt;script&gt;</code> tags, the <code>const name=</code> declaration and the
+      <code>nonce</code> attribute are all charged. The same data can fit without a nonce and
+      not fit with one.</li>
+    <li><strong>Bytes, after escaping.</strong> <code>&lt;</code>, <code>&gt;</code> and
+      <code>&amp;</code> each become a six-byte <code>\uXXXX</code> escape, and a character
+      outside ASCII costs two to four bytes. A 200,000-character string of <code>&lt;</code> is
+      1.2 MB of payload and is rejected.</li>
+    <li><strong>Per render, shared by the page.</strong> One budget covers every
+      <code>var</code> block, so five blocks cannot each spend the full megabyte. Each render
+      starts fresh.</li>
+  </ul>
+
+  <p>The check happens in two stages. A cheap lower bound is spent as the value is walked, so a
+  result that cannot possibly fit fails before the whole structure has been copied, with the path
   where it ran out:</p>
 
-<pre><code>Cannot export more than 1048576 bytes; limit reached at $[8421].email</code></pre>
+<pre><code>Cannot export more than 1048576 bytes per page; limit reached at $[8421].email</code></pre>
 
-  <p>The limit is per export, not per request or per page: each <code>var</code> block gets its own
-  1 MB budget. If you are approaching it, the data almost certainly wants paginating or fetching
-  from the client rather than inlining into the document.</p>
+  <p>Whatever survives that is serialized and then measured for real, which is the check that
+  actually defines the limit:</p>
+
+<pre><code>&lt;weld var="rows"&gt; in /app/page.html: Cannot export more than 1048576 bytes per page;
+the emitted &lt;script&gt; payload reached 1200028 bytes</code></pre>
+
+  <p>Raise it per page with <code>compileSource(src, { maxExportBytes })</code>, which validates
+  the value at compile time rather than on the first request. But if you are approaching the
+  default, the data almost certainly wants paginating or fetching from the client rather than
+  inlining into the document.</p>
 
   <p>See <a href="#security">Security</a> for why these are enforced rather than conveniences.</p>
 </section>
@@ -741,6 +814,17 @@ app.get('/profile', page.handler);</code></pre>
 <section id="api">
   <h2>API</h2>
 
+  <div class="warn">
+    <p><strong>Stability: pre-1.0.</strong> Everything below works as described and is covered by
+    tests, but nothing is frozen. <code>load</code>, <code>router</code>, <code>page.handler</code>,
+    <code>page.render</code> and the export rules are settled in shape and unlikely to change.
+    The <strong>browser-side contract</strong> — a <code>var</code> block emitting a bare
+    <code>const name</code> global — is explicitly undecided and is the most likely thing to
+    change before 1.0; see <a href="#exporting">Exporting data</a>. Treat <code>scan</code>,
+    <code>serialize</code>, <code>assertSerializable</code> and <code>page.parts</code> as
+    internals that happen to be exported.</p>
+  </div>
+
   <div class="sig">load(filename)</div>
   <p>Returns a page <strong>synchronously</strong> and compiles it in the background, so a server
   needs no async wrapper. Requests arriving before compilation finishes wait for it. Loading the
@@ -762,7 +846,21 @@ app.listen(3000);</code></pre>
   </div>
 
   <div class="sig">page.ready</div>
-  <p>The compile promise, for callers who want to await compilation or fail at boot.</p>
+  <p>The compile promise, for callers who want to await compilation or fail at boot. It is a
+  <strong>getter, not a fixed promise</strong>: reading it after a failure starts a fresh compile
+  rather than replaying the old error, which is what lets a corrected file recover without a
+  restart.</p>
+<pre><code>const page = load(&#39;./views/home.html&#39;);
+
+// Fail at boot rather than serving errors.
+await page.ready;
+
+// Anything that reads the compiled page must await it first.
+await page.ready;
+console.log(page.dependencies);   // [] before this point, populated after
+</code></pre>
+  <p>You rarely need it: <code>handler</code>, <code>render</code> and
+  <code>renderToBuffer</code> all await compilation internally.</p>
 
   <div class="sig">await compileFile(filename)</div>
   <p>Reads and compiles an HTML file. Runs all setup blocks once. Returns a frozen page object.
@@ -770,16 +868,40 @@ app.listen(3000);</code></pre>
   path built from <code>__dirname</code>.</span></p>
 
   <div class="sig">await compileSource(input, options?)</div>
-  <p>Same, from a string or Buffer. <code>options.filename</code> sets what <code>require</code>,
-  <code>__filename</code>, and <code>__dirname</code> resolve against inside the page.</p>
+  <p>Same, from a string or Buffer. Options, all optional:</p>
+  <table>
+    <thead><tr><th>Option</th><th>Default</th><th>Effect</th></tr></thead>
+    <tbody>
+      <tr><td><code>filename</code></td><td><code>page.html</code></td>
+        <td>What <code>require</code>, <code>__filename</code>, <code>__dirname</code> and
+          <code>&lt;weld src&gt;</code> resolve against inside the page.</td></tr>
+      <tr><td><code>maxExportBytes</code></td><td><code>1048576</code></td>
+        <td>Emitted <code>&lt;script&gt;</code> bytes one render may produce. Must be an integer
+          of at least 1024; validated at compile time, so a bad value throws here rather than on
+          the first request.</td></tr>
+      <tr><td><code>warnOnMutableSetup</code></td><td><code>true</code></td>
+        <td>Set <code>false</code> to silence the shared-setup-scope warning.</td></tr>
+    </tbody>
+  </table>
+  <p>Passing a non-object, a non-string <code>filename</code>, or an out-of-range
+  <code>maxExportBytes</code> throws <code>TypeError</code>.</p>
 
   <div class="sig">page.handler(request, response, next?)</div>
   <p>A ready-made route handler. Renders the page, ends the response, and forwards any failure
   to <code>next</code>. Sets <code>content-type: text/html; charset=utf-8</code> only if nothing
   has set it already.</p>
-<pre><code>app.get(/, page.handler);</code></pre>
+<pre><code>app.get(&#39;/&#39;, page.handler);</code></pre>
   <p>Called without <code>next</code>, it returns the promise instead, so a vanilla server can
-  handle the failure itself rather than having it swallowed.</p>
+  handle the failure itself rather than having it swallowed. <strong>You must attach a
+  <code>catch</code>.</strong> Passing it straight to <code>http.createServer(page.handler)</code>
+  leaves the rejection unhandled, which terminates the process on the first failing block:</p>
+<pre><code>http.createServer((request, response) =&gt; {
+  page.handler(request, response).catch((error) =&gt; {
+    console.error(error);
+    if (!response.headersSent) response.writeHead(500);
+    response.end(&#39;Internal Server Error&#39;);
+  });
+});</code></pre>
 
   <div class="sig">page.render(request, response)</div>
   <p>Streams the page, writing static buffers directly and awaiting <code>'drain'</code> on
@@ -797,17 +919,38 @@ app.listen(3000);</code></pre>
   own allocation at compile time so the source can be collected — holding it would make every page
   cost its own size twice, which matters once an app has hundreds of pages.</p>
 
-  <div class="sig">router(directory, options?)</div>
+  <div class="sig">router(directory)</div>
   <p>Maps a directory of <code>.html</code> files to routes, resolved once at startup. Returns an
-  Express-compatible middleware. <code>middleware.routes</code> lists what was mounted.</p>
+  Express-compatible middleware. <code>middleware.routes</code> lists what was mounted. It takes
+  no options: the directory is the whole configuration. Throws if <code>directory</code> is not a
+  non-empty string, or does not name a directory.</p>
 
   <div class="sig">watch(page, options?)</div>
-  <p>Recompiles the page when its file, or any file it includes, changes. Development only.
-  <code>options.onChange</code> is called after each rebuild; <code>options.dependencies</code>
-  overrides the watched extras. Returns a watcher with <code>close()</code> and <code>files</code>.</p>
+  <p>Recompiles the page when its file, or any file it includes, changes. Development only —
+  it holds open file handles. Returns a watcher with <code>close()</code>, <code>page</code>, and
+  a live <code>files</code> list. Watching the same page twice returns the existing watcher.</p>
+<pre><code>const page = load(&#39;./views/home.html&#39;);
+if (process.env.NODE_ENV !== &#39;production&#39;) watch(page);</code></pre>
+  <p>The include graph is not known until the page has compiled, so the watched set is
+  <strong>not fixed when <code>watch()</code> is called</strong>. It is reconciled against
+  <code>page.dependencies</code> once the initial compile settles and again after every
+  successful rebuild — so the sequence above works with no <code>await</code> between the two
+  calls, an include added later starts being watched, and one removed stops.</p>
+  <p><code>options.onChange(page)</code> is called after each rebuild is triggered.
+  <code>options.dependencies</code> <em>pins</em> the watched set to exactly that list plus the
+  page itself, for related files that are not expressible as includes; reconciliation is then
+  skipped, so includes are not added to a pinned list. A file that cannot be watched is reported
+  on stderr and does not stop the others.</p>
+  <p><code>close()</code> closes every handle, cancels any rebuild still inside the debounce
+  window, and stops later reconciliation from reopening anything.
+  <code>clearLoaded()</code> closes all open watchers.</p>
 
   <div class="sig">page.dependencies &middot; page.invalidate()</div>
-  <p>The files pulled in by <code>&lt;weld src&gt;</code>, and a manual rebuild trigger.</p>
+  <p>The absolute paths pulled in by <code>&lt;weld src&gt;</code>, transitively, and a manual
+  rebuild trigger. On a loaded page <code>dependencies</code> is <code>[]</code> and
+  <code>parts</code> is <code>undefined</code> until the first compile finishes — await
+  <code>page.ready</code> first. <code>invalidate()</code> drops the compiled page so the next
+  use rebuilds from disk, re-running setup blocks, and returns the new compile promise.</p>
 
   <div class="sig">await shared(key, factory)</div>
   <p>Process-wide resource cache. The factory runs once per key; concurrent callers receive the same
@@ -816,8 +959,15 @@ app.listen(3000);</code></pre>
   <div class="sig">clearShared()</div>
   <p>Empties the cache. Intended for tests.</p>
 
-  <div class="sig">serialize(value) &middot; assertSerializable(value) &middot; MAX_DEPTH &middot; MAX_EXPORT_BYTES</div>
-  <p>The export serializer, its validator, the depth limit (64), and the per-export size limit (1 MB).</p>
+  <div class="sig">clearLoaded()</div>
+  <p>Empties the page cache and closes every open watcher. Intended for tests.</p>
+
+  <div class="sig">serialize(value, budget?) &middot; assertSerializable(value, budget?) &middot; MAX_DEPTH &middot; MAX_EXPORT_BYTES</div>
+  <p>The export serializer, its validator, the depth limit (<code>64</code>), and the default size
+  limit (<code>1048576</code>). Both accept an optional budget and create a fresh one otherwise, so
+  called without it each call gets the full limit. <code>assertSerializable</code> validates without
+  producing output, so it checks structure and the walk's lower bound but not the exact byte
+  count.</p>
 
   <div class="sig">scan(input)</div>
   <p>The low-level scanner. Returns <code>{ source, parts }</code> with byte offsets.</p>
@@ -825,9 +975,16 @@ app.listen(3000);</code></pre>
 
 <section id="errors">
   <h2>Errors</h2>
-  <p>Scan-time problems throw <code>WeldSyntaxError</code> (a <code>SyntaxError</code>) carrying a
-  byte <code>offset</code>. Because compilation happens at startup, a malformed page stops the server
-  at boot instead of failing under traffic.</p>
+  <p>Scan-time problems throw <code>WeldSyntaxError</code> (a <code>SyntaxError</code>) carrying
+  <code>offset</code>, <code>line</code> and <code>column</code>, with the filename prefixed to the
+  message. Compilation happens at startup, so a malformed page is caught before any traffic
+  reaches it.</p>
+  <p>It does <strong>not</strong> stop the process. <code>load()</code> reports the failure on
+  stderr immediately and rejects <code>page.ready</code>; requests for that page then fail through
+  <code>next</code> while the rest of the server keeps serving. Only a successful compile is
+  cached, so fixing the file recovers on the next request. To exit at boot instead, await it
+  yourself:</p>
+<pre><code>await page.ready;   // or: page.ready.catch(() =&gt; process.exit(1))</code></pre>
   <p>Export problems throw <code>TypeError</code> at render time, from the request that caused them.
   The message names the block and the page, and the original error is kept as
   <code>error.cause</code>:</p>
@@ -891,12 +1048,21 @@ emitted: &lt;script&gt;const v="require(\"fs\"); doSomething();";&lt;/script&gt;
     <li>Literal <code>&lt;weld&gt;</code> and <code>&lt;/weld&gt;</code> are reserved sequences
       anywhere in the file, including inside comments, scripts, and attribute values.</li>
     <li>Nested <code>&lt;weld&gt;</code> blocks are rejected.</li>
-    <li><code>var</code> is the only supported attribute.</li>
-    <li>No router, hot reload, body parser, sessions, or database abstraction.</li>
+    <li><code>var</code> and <code>src</code> are the only supported attributes.</li>
+    <li>Includes are flat: a page can pull in a partial, but cannot be <em>wrapped</em> by a
+      layout.</li>
+    <li>No body parser, sessions, authentication, or database abstraction, by design.</li>
     <li><code>renderToBuffer()</code> copies the whole page into one buffer; <code>render()</code>
       writes the static buffers directly and is about 16x cheaper per request.</li>
-    <li>Exports are capped at 1 MB and 64 levels of nesting; the limits are constants, not yet
-      configurable per page.</li>
+    <li>Exports are capped at 1 MiB per render and 64 levels of nesting. The size limit is
+      configurable per page via <code>maxExportBytes</code>; the depth limit is still a
+      constant.</li>
+    <li>Exported data becomes a bare browser global (<code>const users</code>), so a name
+      collision with a third-party script is still possible. Collisions with the page's own
+      <code>&lt;script&gt;</code> blocks are caught at compile time; ones from an external
+      <code>&lt;script src&gt;</code> are not.</li>
+    <li><code>watch()</code> opens one file handle per watched file, which will hit the inotify
+      limit on Linux at a large enough page count.</li>
   </ul>
 </section>
 
