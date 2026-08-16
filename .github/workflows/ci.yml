@@ -45,9 +45,9 @@ jobs:
         shell: bash
 
       # Raw job logs need a token to fetch, which makes a platform-specific
-      # failure awkward to diagnose from outside the repo. The job summary is
-      # published on the check run, so the failing assertions are readable
-      # without one.
+      # failure awkward to diagnose from outside the repo. The summary is for
+      # humans; the annotation is the same information somewhere the Checks API
+      # will serve without a token.
       - name: Report failing tests
         if: failure() && steps.test.outcome == 'failure'
         shell: bash
@@ -58,17 +58,18 @@ jobs:
             echo '```'
             grep -E '^(not ok|# (tests|pass|fail|skipped))' test-output.txt || true
             echo '```'
-            echo
-            echo '<details><summary>Failure detail</summary>'
-            echo
-            echo '```'
-            sed -n '/^# Subtest/,$p' test-output.txt | grep -E \
-              'not ok|error:|code:|expected:|actual:|failureType:|AssertionError|Error:|at ' \
-              | head -80 || true
-            echo '```'
-            echo
-            echo '</details>'
           } >> "$GITHUB_STEP_SUMMARY"
+
+          # An annotation is a single line, so newlines are escaped as %0A and
+          # literal percent signs first as %25.
+          detail=$(grep -E "^not ok|AssertionError|expected:|actual:|operator:|Error:|code: '" \
+            test-output.txt | head -40 | sed 's/%/%25/g')
+
+          if [ -n "$detail" ]; then
+            printf '::error title=%s node %s::%s\n' \
+              '${{ matrix.os }}' '${{ matrix.node }}' \
+              "$(printf '%s' "$detail" | awk 'BEGIN{ORS="%0A"} {print}')"
+          fi
 
   package:
     name: package
