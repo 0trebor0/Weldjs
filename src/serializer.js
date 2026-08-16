@@ -180,12 +180,27 @@ function assertSerializable(value, budget = createBudget()) {
 // error. Base64 covers what crypto.randomBytes().toString('base64') produces.
 const NONCE_PATTERN = /^[A-Za-z0-9+/_-]{8,256}={0,2}$/;
 
+// Exports land on one namespace object rather than as bare globals. A bare
+// `const users` is a global nobody else on the page may use, and a second
+// declaration of that name — from a CDN script the compiler cannot see — is a
+// SyntaxError that disables every script on the page while the server still
+// returns 200.
+//
+// Written as an assignment expression so the whole thing is one statement and
+// the guard is idempotent: blocks are emitted independently and any of them may
+// be the first to run. An export overwrites whatever the property held before.
+const NAMESPACE = 'weld';
+
+function assignment(name, serialized) {
+  return `(window.${NAMESPACE}=window.${NAMESPACE}||{}).${name}=${serialized};`;
+}
+
 function clientScript(name, value, nonce, budget = createBudget()) {
   const serialized = serialize(value, budget);
   let script;
 
   if (nonce === undefined || nonce === null) {
-    script = `<script>const ${name}=${serialized};</script>`;
+    script = `<script>${assignment(name, serialized)}</script>`;
   } else {
     if (typeof nonce !== 'string' || !NONCE_PATTERN.test(nonce)) {
       throw new TypeError(
@@ -193,7 +208,7 @@ function clientScript(name, value, nonce, budget = createBudget()) {
       );
     }
 
-    script = `<script nonce="${nonce}">const ${name}=${serialized};</script>`;
+    script = `<script nonce="${nonce}">${assignment(name, serialized)}</script>`;
   }
 
   // The limit covers the whole emitted element, so the tags, the variable name
@@ -212,6 +227,7 @@ module.exports = {
   createBudget,
   clientScript,
   assertSerializable,
+  NAMESPACE,
   MAX_DEPTH,
   MAX_EXPORT_BYTES
 };

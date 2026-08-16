@@ -4,11 +4,12 @@ const OPEN = Buffer.from('<weld');
 const CLOSE = Buffer.from('</weld>');
 const GT = '>'.charCodeAt(0);
 
-// A var name becomes `const <name>=...` in the emitted script. These cannot be
-// binding identifiers, so they would produce a client-side SyntaxError that
-// breaks every script on the page. The strict-mode-only words are included too:
-// they are legal in the classic script that is emitted today, but relying on
-// that would make the output brittle.
+// A var name becomes a property on the export namespace, `weld.<name>`, where a
+// reserved word is in fact legal JavaScript — `weld.class` parses. These are
+// still rejected, and deliberately so: the restriction predates the namespace,
+// relaxing it would widen what pages may declare, and `weld.new` reads as a
+// mistake at the call site. Narrowing it back later would be breaking, so it
+// stays until there is a reason to change it.
 const RESERVED_NAMES = new Set([
   'await', 'break', 'case', 'catch', 'class', 'const', 'continue', 'debugger',
   'default', 'delete', 'do', 'else', 'enum', 'export', 'extends', 'false',
@@ -160,33 +161,45 @@ function describe(value) {
   return `a ${typeof value}`;
 }
 
-// Finds top-level declarations in the page's own <script> blocks. A name that
-// collides with a var block produces `const x` twice, which is a SyntaxError
-// that disables every script on the page — the failure is silent server-side, so
-// it is worth catching at compile time. Deliberately conservative: it looks only
-// for declarations at the start of a line, so an occurrence inside a string or a
-// nested block is not mistaken for one.
+// Exports are emitted onto a single `window.weld` namespace, so a var block no
+// longer collides with same-named page code — `weld.users` and a page's own
+// `const users` coexist. What does collide is a page script declaring the
+// namespace itself. A top-level `var weld` or `function weld` in a classic
+// script writes to `window.weld` and destroys the exports; a `const weld`
+// shadows them for the rest of that script. Both are silent server-side, so
+// they are worth catching at compile time.
+//
+// Deliberately conservative: it looks only for declarations at the start of a
+// line, so an occurrence inside a string or a nested block is not mistaken for
+// one.
 const SCRIPT_BLOCK = /<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi;
 const TOP_LEVEL_DECLARATION = /^[ \t]*(?:const|let|var|function|class)\s+([A-Za-z_$][A-Za-z0-9_$]*)/gm;
 
-function declaredInPageScripts(source) {
+// Kept in step with NAMESPACE in serializer.js. Not imported, because the
+// scanner is otherwise independent of how a value is emitted.
+const NAMESPACE = 'weld';
+
+// Returns the offset of the offending <script>, or -1. An offset of 0 is a
+// legitimate answer, so the result is compared against -1 rather than tested
+// for truthiness.
+function declaresNamespace(source) {
   const text = source.toString('utf8');
-  const names = new Map();
+  let at = -1;
 
   let script;
-  while ((script = SCRIPT_BLOCK.exec(text)) !== null) {
-    const body = script[1];
+  while (at === -1 && (script = SCRIPT_BLOCK.exec(text)) !== null) {
     let declaration;
-    while ((declaration = TOP_LEVEL_DECLARATION.exec(body)) !== null) {
-      if (!names.has(declaration[1])) {
-        names.set(declaration[1], script.index);
+    while ((declaration = TOP_LEVEL_DECLARATION.exec(script[1])) !== null) {
+      if (declaration[1] === NAMESPACE) {
+        at = script.index;
+        break;
       }
     }
     TOP_LEVEL_DECLARATION.lastIndex = 0;
   }
 
   SCRIPT_BLOCK.lastIndex = 0;
-  return names;
+  return at;
 }
 
 function scan(input) {
@@ -199,7 +212,7 @@ function scan(input) {
   const source = Buffer.isBuffer(input) ? input : Buffer.from(input);
   const parts = [];
   const declared = new Set();
-  const pageScriptNames = declaredInPageScripts(source);
+  const namespaceClashAt = declaresNamespace(source);
   let cursor = 0;
 
   while (cursor < source.length) {
@@ -279,12 +292,14 @@ function scan(input) {
         throw new WeldSyntaxError(`Duplicate client variable name "${attrs.var}"`, tagStart, source);
       }
 
-      const clash = pageScriptNames.get(attrs.var);
-      if (clash !== undefined) {
+      // Only worth reporting on a page that actually exports something.
+      if (namespaceClashAt !== -1) {
         throw new WeldSyntaxError(
-          `Client variable "${attrs.var}" is also declared by a <script> on this page, ` +
-          'which would be a SyntaxError disabling every script',
-          tagStart
+          `A <script> on this page declares "${NAMESPACE}" at the top level, which is ` +
+          `the namespace exports are written to; "${NAMESPACE}.${attrs.var}" would be ` +
+          'destroyed or shadowed by it',
+          namespaceClashAt,
+          source
         );
       }
 

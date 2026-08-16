@@ -148,5 +148,11 @@ export declare function assertSerializable(value: unknown, budget?: Budget): voi
 export declare function shared<T>(key: string, factory: () => T | Promise<T>): Promise<T>;
 export declare function clearShared(): void;
 
+/**
+ * The browser global exports are written to: `weld.<name>` for each
+ * `<weld var="name">` block on the page.
+ */
+export declare const NAMESPACE: 'weld';
+
 export declare const MAX_DEPTH: number;
 export declare const MAX_EXPORT_BYTES: number;
