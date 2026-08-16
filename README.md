@@ -35,6 +35,8 @@ console.log(users);
 
 ## Documentation
 
+Open work and known risks are tracked in [`TODO.md`](TODO.md).
+
 Full docs — tutorial, guide, API reference, and security notes — are a single
 self-contained page at [`docs/index.html`](docs/index.html). Open it directly, or
 serve it:

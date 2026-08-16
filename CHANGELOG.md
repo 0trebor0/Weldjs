@@ -2,6 +2,18 @@
 
 ## Unreleased — 2026-08-15
 
+### Security
+
+- **Exports are now bounded per render rather than per block.** The 1 MB cap applied to each `<weld var>` independently, so a page with five blocks could produce 4.29 MB and hold 18.9 MB per in-flight request — at 100 concurrent requests, roughly 1.9 GB. One budget is now shared by every block on the page. The limit is configurable with `compileSource(src, { maxExportBytes })` and validated at compile time.
+- **A client variable that collides with a page `<script>` is rejected at compile time.** Two `const x` declarations are a `SyntaxError` that disables every script on the page, while the server still returns 200 — a silent failure. The check is conservative: only top-level declarations count, so occurrences inside a nested block or a string do not trigger it. It cannot see names introduced by external scripts loaded with `src`.
+- **A top-level `let`/`var` in a setup block now warns.** Setup scope is shared by every request, so request data placed there leaks between users, and the leak needs a mutable binding. Heuristic rather than proof; opt out with `{ warnOnMutableSetup: false }`.
+
+### Changed
+
+- **Syntax errors report line and column** instead of a byte offset, and carry `.line` and `.column`. `WeldSyntaxError ... (byte 4173)` was unhelpful in a large file.
+- `page.parts` is frozen through rather than only at the top level.
+- The package is no longer `private`. Added MIT `LICENSE`, hand-written `types/index.d.ts`, `.gitattributes` (`* text=auto eol=lf`) to end the LF/CRLF churn, and `files`/`exports`/`types`/`keywords` fields.
+
 ### Changed — project renamed to WeldJS
 
 - The project is now **WeldJS**; the package name is `weldjs`.

@@ -413,6 +413,41 @@ Regression check: render throughput unchanged at 33,000-35,000 renders/sec acros
 One test earned its keep: "a loaded page exposes the same surface as a compiled one" failed
 the moment `dependencies` was added to compiled pages but not loaded ones.
 
+## Forward-looking risks
+
+A review of what works today but becomes a problem as the project grows is recorded in
+`TODO.md`. Two items there were confirmed by measurement rather than inspection: client-side
+global collisions break every script on a page, and the 1 MB export cap is per block rather
+than per page, so five blocks produced a 4.29 MB response holding 18.9 MB per in-flight
+request.
+
+## Sixteenth pass: acting on the risk review
+
+Worked through `TODO.md`. Eight items closed, four deferred with reasons recorded there.
+
+| Item | Outcome |
+| --- | --- |
+| Export cap per block, not per page | Fixed: one budget per render. The 5-block page that produced 4.29 MB now fails on the second block. |
+| Client global collisions | Fixed by compile-time detection rather than the namespace change, which would break every existing page. Residual risk (external scripts) recorded. |
+| Setup-scope leak | Warning on top-level `let`/`var` in setup blocks, opt-out available. Heuristic. |
+| Literal `<weld>` in a page | No code needed: `&lt;weld&gt;` already passes the scanner. Now tested and documented. |
+| Byte offsets in errors | Line and column, plus `.line`/`.column`. |
+| `page.parts` shallow freeze | Frozen through. |
+| Export limit not configurable | `maxExportBytes` option, validated at compile. |
+| Packaging | LICENSE, `.gitattributes`, `types/index.d.ts`, real `package.json` fields. |
+
+The collision fix is worth noting as a judgement call. The TODO proposed emitting into a
+namespace, which is the complete fix but breaks the client contract for every page written
+so far. Detecting the collision at compile time closes the confirmed failure without a
+breaking change, and the namespace option is left recorded for when the syntax is settled.
+
+One mistake mid-pass: a scripted edit to `src/serializer.js` was mangled by shell quoting
+around a `'$'` literal, duplicating whole blocks. Caught by `node --check`, restored with
+`git checkout`, and redone with the editor rather than a shell script. Tests confirmed the
+restore before continuing.
+
+Verified: 71 unit tests, all five sweeps, example server, and 33,215 renders/sec.
+
 ## Assumptions, limitations, remaining risks
 
 - **Serialization is ~35% slower** on large payloads (1.94 ms → 2.61 ms for a 224 KB

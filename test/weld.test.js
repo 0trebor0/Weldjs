@@ -25,6 +25,9 @@ test('scanner leaves normal HTML as byte ranges', () => {
 });
 
 test('setup runs once and request blocks run on every render', async () => {
+  // This page deliberately mutates setup scope to prove setup runs once, which
+  // is the pattern the warning exists to discourage. Opted out so the test does
+  // not emit it.
   const page = await compileSource(`
 <weld>
 let count = 0;
@@ -36,7 +39,7 @@ count += 1;
 return { count, value: base + count };
 </weld>
 <p>after</p>
-`);
+`, { warnOnMutableSetup: false });
 
   const first = (await page.renderToBuffer()).toString();
   const second = (await page.renderToBuffer()).toString();
@@ -659,6 +662,63 @@ test('handler returns a promise when called without next', async () => {
   await assert.rejects(() => result, /no next here/);
 });
 
+test('a client variable clashing with a page script is rejected', async () => {
+  // Two `const users` declarations are a SyntaxError that disables every script
+  // on the page, and the server would still return 200.
+  await assert.rejects(
+    () => compileSource('<weld var="users">return [1];</weld><script>const users = "mine";</script>'),
+    /also declared by a <script> on this page/
+  );
+
+  await assert.rejects(
+    () => compileSource('<weld var="init">return 1;</weld><script>function init() {}</script>'),
+    /also declared by a <script>/
+  );
+});
+
+test('the collision check does not fire on nested or quoted occurrences', async () => {
+  await assert.doesNotReject(() =>
+    compileSource('<weld var="users">return [1];</weld><script>function f() { const users = 1; }</script>')
+  );
+
+  await assert.doesNotReject(() =>
+    compileSource('<weld var="users">return [1];</weld><script>const s = "const users = 1";</script>')
+  );
+});
+
+test('syntax errors report line and column, not a byte offset', async () => {
+  await assert.rejects(
+    () => compileSource('<p>a</p>\n<div>\n  <weld var="x">return 1;\n'),
+    (error) => {
+      assert.match(error.message, /Missing <\/weld> \(line 3, column 3\)/);
+      assert.equal(error.line, 3);
+      assert.equal(error.column, 3);
+      return true;
+    }
+  );
+});
+
+test('a page can be documented using the entity form', async () => {
+  // &lt;weld&gt; renders as <weld> in a browser but is not matched by the scanner,
+  // so a page can describe the syntax without triggering it.
+  const page = await compileSource(
+    '<p>Write &lt;weld var="x"&gt; to declare a block.</p><weld var="v">return 1;</weld>'
+  );
+
+  const output = (await page.renderToBuffer()).toString();
+  assert.match(output, /Write &lt;weld var="x"&gt; to declare a block\./);
+  assert.match(output, /const v=1;/);
+});
+
+test('page.parts is frozen through, not only at the top level', async () => {
+  const page = await compileSource('<p>a</p><weld var="v">return 1;</weld>');
+
+  assert.ok(Object.isFrozen(page.parts), 'the parts array is mutable');
+  for (const part of page.parts) {
+    assert.ok(Object.isFrozen(part), 'a part is mutable');
+  }
+});
+
 test('source must be a string or Buffer, with no silent coercion', async () => {
   // Buffer.from() accepts an array and reinterprets its elements as bytes, which
   // would compile nonsense instead of rejecting it.
@@ -703,7 +763,7 @@ test('an oversized export is rejected', () => {
 test('a single oversized string is rejected', () => {
   assert.throws(
     () => serialize({ blob: 'x'.repeat(MAX_EXPORT_BYTES + 1) }),
-    /Cannot export more than 1048576 bytes; limit reached at \$\.blob/
+    /Cannot export more than 1048576 bytes per page; limit reached at \$\.blob/
   );
 });
 
@@ -724,7 +784,7 @@ test('a normal page payload stays well inside the limit', () => {
   assert.ok(serialize(rows).length < MAX_EXPORT_BYTES);
 });
 
-test('the size budget is per export, not cumulative across renders', async () => {
+test('the size budget is per render, not cumulative across renders', async () => {
   const page = await compileSource(
     '<weld var="v">return { blob: "y".repeat(600000) };</weld>'
   );
@@ -732,6 +792,35 @@ test('the size budget is per export, not cumulative across renders', async () =>
   // Each render must get a fresh budget; a shared one would fail the second.
   await assert.doesNotReject(() => page.renderToBuffer());
   await assert.doesNotReject(() => page.renderToBuffer());
+});
+
+test('the size budget is shared by every block on the page', async () => {
+  // Each block is under the 1 MB cap on its own; together they are over it.
+  const page = await compileSource(
+    ['a', 'b', 'c'].map((n) => `<weld var="${n}">return "x".repeat(600000);</weld>`).join('')
+  );
+
+  await assert.rejects(
+    () => page.renderToBuffer(),
+    /Cannot export more than 1048576 bytes per page/,
+    'a page produced more than the limit by splitting it across blocks'
+  );
+});
+
+test('the export limit is configurable per page', async () => {
+  const source = '<weld var="v">return "x".repeat(50000);</weld>';
+
+  await assert.rejects(
+    () => compileSource(source, { maxExportBytes: 10000 }).then((p) => p.renderToBuffer()),
+    /Cannot export more than 10000 bytes per page/
+  );
+
+  const roomy = await compileSource(source, { maxExportBytes: 4 * 1024 * 1024 });
+  await assert.doesNotReject(() => roomy.renderToBuffer());
+
+  // A nonsensical limit fails at compile rather than on the first request.
+  await assert.rejects(() => compileSource(source, { maxExportBytes: 10 }), /at least 1024 bytes/);
+  await assert.rejects(() => compileSource(source, { maxExportBytes: 1.5 }), /integer/);
 });
 
 test('line separators and ampersands are escaped', () => {

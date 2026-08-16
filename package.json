@@ -1,10 +1,26 @@
 {
   "name": "weldjs",
   "version": "0.1.0",
-  "description": "Vanilla Node.js prototype: execute <weld> blocks in otherwise untouched HTML.",
+  "description": "Run server-side JavaScript inside otherwise untouched HTML files.",
+  "keywords": ["html", "template", "server-side", "express", "pages"],
+  "license": "MIT",
   "main": "src/index.js",
+  "types": "types/index.d.ts",
   "type": "commonjs",
-  "private": true,
+  "files": [
+    "src",
+    "types",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "exports": {
+    ".": {
+      "types": "./types/index.d.ts",
+      "require": "./src/index.js"
+    },
+    "./package.json": "./package.json"
+  },
   "scripts": {
     "test": "node --test",
     "start": "node example/server.js",

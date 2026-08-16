@@ -5,7 +5,7 @@ const path = require('node:path');
 const { createRequire } = require('node:module');
 const { once } = require('node:events');
 const { scan } = require('./scanner');
-const { clientScript } = require('./serializer');
+const { clientScript, createBudget, MAX_EXPORT_BYTES } = require('./serializer');
 const { shared } = require('./shared');
 
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
@@ -95,6 +95,34 @@ function buildRuntimeParts(parsed, handlers) {
 // this also stops a legal but absurd depth from exhausting the stack.
 const MAX_INCLUDE_DEPTH = 16;
 
+// Setup scope is shared by every request for the life of the process, so request
+// data placed there leaks between users. The leak needs a mutable binding, and
+// it is invisible without concurrency, so a top-level let/var in a setup block is
+// worth flagging even though the check is only a heuristic: const bindings, which
+// cannot be reassigned, are what setup scope is for.
+const MUTABLE_SETUP_BINDING = /^[ \t]*(let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)/gm;
+
+function warnAboutMutableSetup(parsed, filename) {
+  const names = [];
+
+  for (const part of parsed.parts) {
+    if (part.type !== 'weld' || part.mode !== 'setup') continue;
+
+    const code = getCode(parsed.source, part);
+    let match;
+    while ((match = MUTABLE_SETUP_BINDING.exec(code)) !== null) names.push(match[2]);
+    MUTABLE_SETUP_BINDING.lastIndex = 0;
+  }
+
+  if (names.length === 0) return;
+
+  console.warn(
+    `WeldJS: ${filename} declares mutable setup bindings (${names.join(', ')}). ` +
+    'Setup scope is shared by every request, so anything derived from a request ' +
+    'must live inside a <weld var> block instead. Use const for shared resources.'
+  );
+}
+
 // Replaces every <weld src="..."> with the contents of that file, recursively,
 // before anything else runs. The scanner and compiler then work on the expanded
 // bytes exactly as they would on a single file, so includes cost nothing per
@@ -154,12 +182,22 @@ async function compileSource(input, options = {}) {
     throw new TypeError('compileSource() options.filename must be a string');
   }
 
+  // Configurable so a page with a legitimately larger payload does not have to
+  // edit the source. createBudget validates the value.
+  const exportLimit = options.maxExportBytes === undefined
+    ? MAX_EXPORT_BYTES
+    : options.maxExportBytes;
+
+  createBudget(exportLimit);   // fail at compile, not on the first request
+
   const filename = path.resolve(options.filename || 'page.html');
 
   const dependencies = new Set();
   const expanded = expandIncludes(input, filename, [filename], 0, dependencies);
 
   const parsed = scan(expanded);
+  if (options.warnOnMutableSetup !== false) warnAboutMutableSetup(parsed, filename);
+
   const factorySource = buildFactorySource(parsed);
   const pageRequire = createRequire(filename);
 
@@ -184,6 +222,9 @@ async function compileSource(input, options = {}) {
   async function renderToBuffer(request = Object.create(null), response = null) {
     const values = await resolveValues(request, response);
     const nonce = nonceFor(response);
+    // One budget for the whole page, so several blocks cannot each spend the
+    // full limit and leave the request holding a multiple of it.
+    const budget = createBudget(exportLimit);
     const chunks = [];
 
     for (const part of runtimeParts) {
@@ -192,7 +233,7 @@ async function compileSource(input, options = {}) {
         continue;
       }
 
-      chunks.push(scriptFor(part, values[part.valueIndex], nonce));
+      chunks.push(scriptFor(part, values[part.valueIndex], nonce, budget));
     }
 
     return Buffer.concat(chunks);
@@ -213,9 +254,9 @@ async function compileSource(input, options = {}) {
 
   // The serializer reports a path within the value ("$.rows[2]"), which is not
   // enough to locate the block on a page with many of them.
-  function scriptFor(part, value, nonce) {
+  function scriptFor(part, value, nonce, budget) {
     try {
-      return clientScript(part.varName, value, nonce);
+      return clientScript(part.varName, value, nonce, budget);
     } catch (error) {
       throw new TypeError(
         `<weld var="${part.varName}"> in ${filename}: ${error.message}`,
@@ -256,6 +297,7 @@ async function compileSource(input, options = {}) {
 
     const values = await resolveValues(request, response);
     const nonce = nonceFor(response);
+    const budget = createBudget(exportLimit);
 
     const chunks = [];
     let total = 0;
@@ -263,7 +305,7 @@ async function compileSource(input, options = {}) {
     for (const part of runtimeParts) {
       const chunk = part.type === 'html'
         ? part.buffer
-        : scriptFor(part, values[part.valueIndex], nonce);
+        : scriptFor(part, values[part.valueIndex], nonce, budget);
 
       chunks.push(chunk);
       total += chunk.length;
@@ -338,7 +380,9 @@ async function compileSource(input, options = {}) {
     filename,
     // Files pulled in by <weld src>, so watch() can rebuild when one changes.
     dependencies: Object.freeze([...dependencies]),
-    parts: runtimeParts,
+    // Frozen through, not just at the top level: Object.freeze on the page left
+    // this array and its entries mutable.
+    parts: Object.freeze(runtimeParts.map((part) => Object.freeze(part))),
     handler,
     render,
     renderToBuffer

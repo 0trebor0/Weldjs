@@ -21,14 +21,25 @@ function escapeChar(char) {
   return `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`;
 }
 
+// One budget covers a whole render rather than a single value. The cap exists to
+// bound the memory one request can hold, and a per-value cap does not do that: a
+// page with five blocks could produce five times the limit.
+function createBudget(limit = MAX_EXPORT_BYTES) {
+  if (!Number.isInteger(limit) || limit < 1024) {
+    throw new TypeError('Export limit must be an integer of at least 1024 bytes');
+  }
+
+  return { used: 0, limit };
+}
+
 // Approximates the serialized size as the walk proceeds. It need not match
 // JSON.stringify exactly; it must be cheap, monotonic, and never undercount by
 // enough to matter.
 function spend(budget, cost, path) {
   budget.used += cost;
-  if (budget.used > MAX_EXPORT_BYTES) {
+  if (budget.used > budget.limit) {
     throw new TypeError(
-      `Cannot export more than ${MAX_EXPORT_BYTES} bytes; limit reached at ${path}`
+      `Cannot export more than ${budget.limit} bytes per page; limit reached at ${path}`
     );
   }
 }
@@ -117,13 +128,13 @@ function snapshot(value, depth, path, seen, budget) {
   return copy;
 }
 
-function serialize(value) {
-  const safe = snapshot(value, 0, '$', new WeakSet(), { used: 0 });
+function serialize(value, budget = createBudget()) {
+  const safe = snapshot(value, 0, '$', new WeakSet(), budget);
   return JSON.stringify(safe).replace(ESCAPE_PATTERN, escapeChar);
 }
 
-function assertSerializable(value) {
-  snapshot(value, 0, '$', new WeakSet(), { used: 0 });
+function assertSerializable(value, budget = createBudget()) {
+  snapshot(value, 0, '$', new WeakSet(), budget);
 }
 
 // A nonce must be exactly what the Content-Security-Policy header advertises.
@@ -133,8 +144,8 @@ function assertSerializable(value) {
 // error. Base64 covers what crypto.randomBytes().toString('base64') produces.
 const NONCE_PATTERN = /^[A-Za-z0-9+/_-]{8,256}={0,2}$/;
 
-function clientScript(name, value, nonce) {
-  const serialized = serialize(value);
+function clientScript(name, value, nonce, budget) {
+  const serialized = serialize(value, budget);
 
   if (nonce === undefined || nonce === null) {
     return Buffer.from(`<script>const ${name}=${serialized};</script>`);
@@ -151,6 +162,7 @@ function clientScript(name, value, nonce) {
 
 module.exports = {
   serialize,
+  createBudget,
   clientScript,
   assertSerializable,
   MAX_DEPTH,
