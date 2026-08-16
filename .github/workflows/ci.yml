@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A second push to the same branch makes the first run's result irrelevant.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (node ${{ matrix.node }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # 20 is the minimum the engines field claims; 24 is current LTS. The
+        # watcher tests depend on fs.watch, whose event behaviour differs by
+        # platform, so the minimum version is exercised on all three.
+        os: [ubuntu-latest]
+        node: ['20', '22', '24']
+        include:
+          - os: windows-latest
+            node: '20'
+          - os: macos-latest
+            node: '20'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # No dependencies and no lockfile, so there is nothing to install.
+      - name: Test
+        run: npm test
+
+  package:
+    name: package
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Fails the build if the tarball cannot be produced, and prints its
+      # contents so an unintended file added to `files` is visible in the log.
+      - name: Pack
+        run: npm pack --dry-run
+
+      # The package claims to work on the minimum supported version; installing
+      # the real tarball proves the published entry points actually resolve.
+      - name: Install the packed tarball and require it
+        run: |
+          npm pack
+          mkdir -p /tmp/consumer && cd /tmp/consumer
+          npm init -y
+          npm install "$GITHUB_WORKSPACE"/weldjs-*.tgz
+          node -e "const w = require('weldjs'); if (typeof w.load !== 'function') { throw new Error('load missing from the published package'); } console.log('ok:', Object.keys(w).join(', '));"

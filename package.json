@@ -4,6 +4,14 @@
   "description": "Run server-side JavaScript inside otherwise untouched HTML files.",
   "keywords": ["html", "template", "server-side", "express", "pages"],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/0trebor0/Weldjs.git"
+  },
+  "bugs": {
+    "url": "https://github.com/0trebor0/Weldjs/issues"
+  },
+  "homepage": "https://github.com/0trebor0/Weldjs#readme",
   "main": "src/index.js",
   "types": "types/index.d.ts",
   "type": "commonjs",
