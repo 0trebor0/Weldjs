@@ -8,6 +8,12 @@
 - **A client variable that collides with a page `<script>` is rejected at compile time.** Two `const x` declarations are a `SyntaxError` that disables every script on the page, while the server still returns 200 — a silent failure. The check is conservative: only top-level declarations count, so occurrences inside a nested block or a string do not trigger it. It cannot see names introduced by external scripts loaded with `src`.
 - **A top-level `let`/`var` in a setup block now warns.** Setup scope is shared by every request, so request data placed there leaks between users, and the leak needs a mutable binding. Heuristic rather than proof; opt out with `{ warnOnMutableSetup: false }`.
 
+### Removed
+
+- `router()` no longer accepts an options argument. It was validated and then never read — surface with no behaviour behind it.
+- `middleware.root` is no longer exposed; nothing consumed it.
+- `NONCE_PATTERN` is no longer exported from the serializer, which is the only module that uses it.
+
 ### Changed
 
 - **Syntax errors report the file, line and column** instead of a byte offset, and carry `.filename`, `.line` and `.column`. A broken partial names the partial rather than the page that included it, since its line number belongs to the partial and matches nothing in the page. `WeldSyntaxError ... (byte 4173)` was unhelpful in a large file.
