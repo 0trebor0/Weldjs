@@ -158,13 +158,9 @@ function pathSegments(url) {
 //   pages/about.html        -> /about
 //   pages/blog/index.html   -> /blog
 //   pages/blog/[slug].html  -> /blog/:slug   (request.params.slug)
-function router(directory, options = {}) {
+function router(directory) {
   if (typeof directory !== 'string' || directory.length === 0) {
     throw new TypeError('router() requires a non-empty string directory');
-  }
-
-  if (options === null || typeof options !== 'object') {
-    throw new TypeError('router() options must be an object');
   }
 
   const root = path.resolve(directory);
@@ -206,8 +202,6 @@ function router(directory, options = {}) {
     ...[...staticRoutes.keys()],
     ...[...dynamicByLength.values()].flat().map((route) => `/${route.segments.join('/')}`)
   ].sort());
-
-  middleware.root = root;
 
   return middleware;
 }

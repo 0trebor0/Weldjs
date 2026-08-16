@@ -1,7 +1,7 @@
 // Type declarations for WeldJS. Hand-written: the API is small enough that
 // generating them would add a build step for no benefit.
 
-import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { ServerResponse } from 'node:http';
 
 /** A value that may be returned from a `<weld var="...">` block. */
 export type Exportable =
@@ -73,15 +73,10 @@ export interface Watcher {
   close(): void;
 }
 
-export interface RouterOptions {
-  [key: string]: unknown;
-}
-
 export interface RouterMiddleware {
   (request: unknown, response: unknown, next?: (error?: unknown) => void): unknown;
   /** Routes that were mounted, sorted. */
   readonly routes: readonly string[];
-  readonly root: string;
 }
 
 export interface ScannedPart {
@@ -118,7 +113,7 @@ export declare function clearLoaded(): void;
 export declare function watch(page: LoadedPage, options?: WatchOptions): Watcher;
 
 /** Maps a directory of .html files to routes, resolved once at startup. */
-export declare function router(directory: string, options?: RouterOptions): RouterMiddleware;
+export declare function router(directory: string): RouterMiddleware;
 
 export declare function compileFile(filename: string): Promise<Page>;
 export declare function compileSource(input: string | Buffer, options?: CompileOptions): Promise<Page>;

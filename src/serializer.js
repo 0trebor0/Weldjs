@@ -166,6 +166,5 @@ module.exports = {
   clientScript,
   assertSerializable,
   MAX_DEPTH,
-  MAX_EXPORT_BYTES,
-  NONCE_PATTERN
+  MAX_EXPORT_BYTES
 };

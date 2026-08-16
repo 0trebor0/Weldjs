@@ -9,7 +9,7 @@ const os = require('node:os');
 const net = require('node:net');
 const path = require('node:path');
 const { EventEmitter } = require('node:events');
-const { compileSource, compileFile, scan, serialize, clearShared, load, clearLoaded, router, watch, MAX_DEPTH, MAX_EXPORT_BYTES } = require('../src');
+const { compileSource, compileFile, scan, serialize, clearShared, load, clearLoaded, router, watch, assertSerializable, WeldSyntaxError, MAX_DEPTH, MAX_EXPORT_BYTES } = require('../src');
 
 test.afterEach(() => { clearShared(); clearLoaded(); });
 
@@ -394,10 +394,6 @@ test('router validates its arguments', () => {
   assert.throws(() => router(42), /non-empty string directory/);
   assert.throws(() => router(''), /non-empty string directory/);
   assert.throws(() => router(path.join(__dirname, 'nope-not-here')), /is not a directory/);
-  assert.throws(
-    () => router(path.join(__dirname, '..', 'example', 'pages'), null),
-    /options must be an object/
-  );
 });
 
 test('weld src includes a file at compile time with no per-request cost', async () => {
@@ -660,6 +656,26 @@ test('handler returns a promise when called without next', async () => {
   const result = page.handler(Object.create(null), response);
   assert.ok(result && typeof result.then === 'function', 'did not return a promise');
   await assert.rejects(() => result, /no next here/);
+});
+
+test('assertSerializable accepts what serialize accepts and rejects what it rejects', () => {
+  assert.doesNotThrow(() => assertSerializable({ a: 1, b: ['x', null, true] }));
+  assert.throws(() => assertSerializable({ fn: () => 1 }), /Cannot export function/);
+  assert.throws(() => assertSerializable({ ['__proto__']: {} }), /__proto__/);
+
+  // It validates without building the output, so it returns nothing.
+  assert.equal(assertSerializable({ a: 1 }), undefined);
+});
+
+test('WeldSyntaxError is the thrown type and carries its position', async () => {
+  await assert.rejects(() => compileSource('<p>a</p>\n<weld var="x">return 1;'), (error) => {
+    assert.ok(error instanceof WeldSyntaxError, `got ${error.constructor.name}`);
+    assert.ok(error instanceof SyntaxError, 'should still be a SyntaxError');
+    assert.equal(error.name, 'WeldSyntaxError');
+    assert.equal(typeof error.offset, 'number');
+    assert.equal(error.line, 2);
+    return true;
+  });
 });
 
 test('a client variable clashing with a page script is rejected', async () => {

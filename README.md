@@ -1,6 +1,11 @@
-# WeldJS prototype
+# WeldJS
 
-A dependency-free vanilla Node.js experiment for PHP-like one-file pages.
+Run server-side JavaScript inside otherwise untouched HTML files. Dependency-free,
+vanilla Node.js, no build step.
+
+A page is compiled once at startup; each request re-runs only the blocks that produce
+data. Shared markup comes from includes, routes come from the directory layout, and the
+data each block returns is serialized into the page.
 
 The HTML file is left alone except for special `<weld>` blocks:
 
