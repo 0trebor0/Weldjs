@@ -448,6 +448,36 @@ restore before continuing.
 
 Verified: 71 unit tests, all five sweeps, example server, and 33,215 renders/sec.
 
+## Seventeenth pass: test everything
+
+Ran the whole suite plus a new 13-check sweep aimed at feature *interactions*, which
+nothing had covered, and a real slow-client test.
+
+One defect found: **syntax errors never named the file.** A plain page reported
+`Missing </weld> (line 3, column 3)` with no filename, and a broken partial reported a line
+number belonging to the partial, which matches nothing in the page that included it. With
+1,000 routed pages and shared partials this is close to undiagnosable. Errors now carry
+`.filename` and name the file in the message.
+
+Interactions confirmed working, none of which had been tested before: a CSP nonce reaches
+blocks contributed by a partial; the per-page export budget covers partial blocks; a
+`<script>` inside a partial is seen by the collision check; a mutable setup binding inside a
+partial warns; the router serves an included page with a nonce and a correct
+`Content-Length`; and a routed page that failed to compile recovers once the file is fixed,
+without a restart.
+
+Security re-checked: a nonce cannot break out of its attribute (3 payloads refused),
+hostile export data still cannot break the script tag, and a traversing include path
+resolves relative to the page rather than reading somewhere unexpected.
+
+Backpressure was previously only tested against fake response objects. Verified against a
+genuinely slow client: a 1.6 MB page with the client stalled for 400 ms completed correctly,
+`Content-Length` matching the body exactly. This had been the most plausible remaining
+production bug and it is clean.
+
+Packaging verified: all 14 exported names present, `files`/`types`/`license` correct, the
+declaration file names the real exports.
+
 ## Assumptions, limitations, remaining risks
 
 - **Serialization is ~35% slower** on large payloads (1.94 ms → 2.61 ms for a 224 KB

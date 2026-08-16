@@ -698,6 +698,30 @@ test('syntax errors report line and column, not a byte offset', async () => {
   );
 });
 
+test('syntax errors name the file they came from', async () => {
+  const dir = fsMod.mkdtempSync(path.join(os.tmpdir(), 'weld-errfile-'));
+
+  fsMod.writeFileSync(path.join(dir, 'plain.html'), '<p>a</p>\n<div>\n  <weld var="x">return 1;\n');
+  await assert.rejects(() => compileFile(path.join(dir, 'plain.html')), (error) => {
+    assert.match(error.message, /plain\.html: Missing <\/weld> \(line 3, column 3\)/);
+    assert.equal(error.filename, path.join(dir, 'plain.html'));
+    return true;
+  });
+
+  // A broken partial must name the partial, not the page that included it —
+  // its line number belongs to the partial and matches nothing in the page.
+  fsMod.writeFileSync(path.join(dir, 'partial.html'), '<div>\n<weld var="y">return 1;\n');
+  fsMod.writeFileSync(path.join(dir, 'page.html'), '<p>one</p>\n<weld src="partial.html"></weld>');
+
+  await assert.rejects(() => compileFile(path.join(dir, 'page.html')), (error) => {
+    assert.match(error.message, /partial\.html: Missing <\/weld>/);
+    assert.equal(error.filename, path.join(dir, 'partial.html'));
+    return true;
+  });
+
+  fsMod.rmSync(dir, { recursive: true, force: true });
+});
+
 test('a page can be documented using the entity form', async () => {
   // &lt;weld&gt; renders as <weld> in a browser but is not matched by the scanner,
   // so a page can describe the syntax without triggering it.

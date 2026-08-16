@@ -10,7 +10,7 @@
 
 ### Changed
 
-- **Syntax errors report line and column** instead of a byte offset, and carry `.line` and `.column`. `WeldSyntaxError ... (byte 4173)` was unhelpful in a large file.
+- **Syntax errors report the file, line and column** instead of a byte offset, and carry `.filename`, `.line` and `.column`. A broken partial names the partial rather than the page that included it, since its line number belongs to the partial and matches nothing in the page. `WeldSyntaxError ... (byte 4173)` was unhelpful in a large file.
 - `page.parts` is frozen through rather than only at the top level.
 - The package is no longer `private`. Added MIT `LICENSE`, hand-written `types/index.d.ts`, `.gitattributes` (`* text=auto eol=lf`) to end the LF/CRLF churn, and `files`/`exports`/`types`/`keywords` fields.
 

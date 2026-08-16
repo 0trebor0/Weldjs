@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { createRequire } = require('node:module');
 const { once } = require('node:events');
-const { scan } = require('./scanner');
+const { scan, WeldSyntaxError } = require('./scanner');
 const { clientScript, createBudget, MAX_EXPORT_BYTES } = require('./serializer');
 const { shared } = require('./shared');
 
@@ -128,12 +128,27 @@ function warnAboutMutableSetup(parsed, filename) {
 // bytes exactly as they would on a single file, so includes cost nothing per
 // request and variable-name collisions across included files are caught by the
 // scanner's existing duplicate check.
+// A line number is only useful with the file it belongs to. Includes make this
+// acute: the position reported for a broken partial is a line in that partial,
+// which matches nothing in the page that pulled it in.
+function scanFile(source, filename) {
+  try {
+    return scan(source);
+  } catch (error) {
+    if (error instanceof WeldSyntaxError && error.filename === undefined) {
+      error.filename = filename;
+      error.message = `${filename}: ${error.message}`;
+    }
+    throw error;
+  }
+}
+
 function expandIncludes(source, filename, chain, depth, dependencies) {
   if (depth > MAX_INCLUDE_DEPTH) {
     throw new Error(`<weld src> nested deeper than ${MAX_INCLUDE_DEPTH} levels in ${filename}`);
   }
 
-  const parsed = scan(source);
+  const parsed = scanFile(source, filename);
   const includes = parsed.parts.filter((part) => part.type === 'weld' && part.mode === 'include');
   if (includes.length === 0) return parsed.source;
 
@@ -195,7 +210,7 @@ async function compileSource(input, options = {}) {
   const dependencies = new Set();
   const expanded = expandIncludes(input, filename, [filename], 0, dependencies);
 
-  const parsed = scan(expanded);
+  const parsed = scanFile(expanded, filename);
   if (options.warnOnMutableSetup !== false) warnAboutMutableSetup(parsed, filename);
 
   const factorySource = buildFactorySource(parsed);

@@ -82,9 +82,13 @@ A script that needs the exact text must split it (`"<wel" + "d>"`).
 - **The Express example is not executed by any test**, because Express is not a dependency.
   Its call sequence is verified against a real `http.ServerResponse`, but routing,
   `express.static` and the error middleware are not.
-- **Backpressure is tested with fake response objects**, never against a real congested
-  socket.
 - **No CI.** Every check so far has been run locally.
+
+## Verified, no longer a concern
+
+- **Backpressure with a slow client.** A 1.6 MB page served to a client stalled for 400 ms
+  completed correctly, with `Content-Length` matching the body exactly. Previously tested
+  only against fake response objects.
 
 ## Considered, not chosen
 
