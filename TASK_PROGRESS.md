@@ -9,7 +9,8 @@ explicitly out of scope. A follow-up instruction required avoiding unbounded loo
 
 ## Status
 
-Complete through the twenty-first pass. All 130 tests pass.
+Complete through the twenty-second pass. 131 tests; all pass on Node 25, and 130
+pass with 1 skipped on Node 20 (the example needs node:sqlite, Node 22.5+).
 
 One item outstanding: the new CI workflow has never been executed, which requires a
 push. Recorded in `TODO.md`.
@@ -693,6 +694,40 @@ both early attempts rewrote two *fixtures* — page-authored `<script>const user
 strings that represent a page's own code, not WeldJS output. Reverted and redone with
 those fixtures protected. Worth recording because a bulk edit over a test file can turn
 assertions green by corrupting what they assert against.
+
+## Twenty-second pass: the first CI run
+
+Pushed; CI ran and **failed**, which is the first thing it has ever told us.
+
+| Job | Result |
+| --- | --- |
+| node 22, 24 (ubuntu) | pass |
+| node 20 (ubuntu, windows, macos) | **fail** |
+| package | pass |
+
+Failing on every platform at one version and no platform at the others ruled out
+the watcher timing this matrix was built to catch, and pointed at an API
+difference instead.
+
+Job logs need auth, so it was reproduced locally: downloaded Node 20.18.1 and ran
+the suite. Three failures, all `ERR_UNKNOWN_BUILTIN_MODULE: node:sqlite` — added
+in Node 22.5, absent in Node 20. Three `load()` tests used `example/page.html`
+as a convenient real page on disk, and that page's setup block requires it.
+
+None of those tests is about SQLite; the dependency was incidental. They now use
+a fixture written to a temp file. A separate test compiles the shipped example
+and is skipped, with a stated reason, when `node:sqlite` is unavailable, so the
+example stays covered where it can run.
+
+`engines` was left at `>=20`, because that is accurate: src/ uses nothing newer,
+and 130 of 131 tests pass there. Only the example needs 22.5, now documented in
+the README.
+
+Verified on both: Node 20.18.1 — 130 pass, 1 skipped, 0 fail. Node 25.6.1 —
+131 pass, 0 skipped, 0 fail.
+
+This is exactly the class of bug CI exists to find. Every check before it ran on
+one Node version on one platform.
 
 ## Assumptions, limitations, remaining risks
 

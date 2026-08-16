@@ -13,6 +13,37 @@ const { compileSource, compileFile, scan, serialize, clearShared, shared, load, 
 
 test.afterEach(() => { clearShared(); clearLoaded(); });
 
+// A real page on disk, for the tests that need one rather than a source string.
+// example/page.html used to serve this purpose, but its setup block requires
+// node:sqlite, which does not exist before Node 22.5 — and none of those tests
+// are about SQLite, so they should not fail on a Node version the library itself
+// supports. The shipped example is covered separately, below.
+const FIXTURE = path.join(os.tmpdir(), `weld-fixture-${process.pid}.html`);
+
+fsMod.writeFileSync(FIXTURE, [
+  '<h1>Users</h1>',
+  '<weld>',
+  'const rows = [{ id: 1, name: "Rob" }, { id: 2, name: "Sarah" }];',
+  '</weld>',
+  '<weld var="users">',
+  'return rows;',
+  '</weld>',
+  '<pre id="output"></pre>'
+].join('\n'));
+
+test.after(() => { fsMod.rmSync(FIXTURE, { force: true }); });
+
+// node:sqlite landed in Node 22.5. The library needs nothing newer than Node 20;
+// only the example does.
+const HAS_SQLITE = (() => {
+  try {
+    require('node:sqlite');
+    return true;
+  } catch {
+    return false;
+  }
+})();
+
 test('scanner leaves normal HTML as byte ranges', () => {
   const input = Buffer.from('<h1>A</h1><weld var="x">return 1;</weld><p>B</p>');
   const parsed = scan(input);
@@ -181,7 +212,7 @@ test('a malformed nonce is refused rather than escaped into the tag', async () =
 });
 
 test('load returns a page synchronously and serves once compiled', async () => {
-  const page = load(path.join(__dirname, '..', 'example', 'page.html'));
+  const page = load(FIXTURE);
 
   // Available immediately, with no await at the call site.
   assert.equal(typeof page.handler, 'function');
@@ -198,7 +229,7 @@ test('load returns a page synchronously and serves once compiled', async () => {
 });
 
 test('load caches by resolved path so setup runs once', async () => {
-  const target = path.join(__dirname, '..', 'example', 'page.html');
+  const target = FIXTURE;
 
   const first = load(target);
   const second = load(target);
@@ -291,7 +322,7 @@ test('a file that does not exist yet can be loaded once it appears', async () =>
 });
 
 test('a loaded page exposes the same surface as a compiled one', async () => {
-  const target = path.join(__dirname, '..', 'example', 'page.html');
+  const target = FIXTURE;
 
   const loaded = load(target);
   assert.equal(loaded.parts, undefined, 'parts should be absent until compiled');
@@ -302,6 +333,18 @@ test('a loaded page exposes the same surface as a compiled one', async () => {
   const missing = Object.keys(compiled).filter((key) => loaded[key] === undefined);
   assert.deepEqual(missing, [], `loaded page missing: ${missing.join(', ')}`);
   assert.ok(Array.isArray(loaded.parts));
+});
+
+test('the shipped example page compiles and exports its rows', {
+  skip: HAS_SQLITE ? false : 'example/page.html requires node:sqlite (Node 22.5+)'
+}, async () => {
+  // The example is the first thing a reader runs, so it is worth proving it
+  // still compiles rather than only that the library does.
+  const page = await compileFile(path.join(__dirname, '..', 'example', 'page.html'));
+  const output = (await page.renderToBuffer()).toString();
+
+  assert.match(output, /\)\.users=\[/, 'the example did not export its rows');
+  assert.ok(output.includes('weld.users'), 'the example page does not read weld.users');
 });
 
 function rawRequest(port, line) {

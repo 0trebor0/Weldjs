@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — 2026-08-16 (CI fixes)
+
+### Fixed
+
+- **The test suite no longer fails on Node 20, the minimum version `engines` claims.** Three `load()` tests used `example/page.html` as a convenient real page on disk. That page's setup block requires `node:sqlite`, which landed in Node 22.5, so all three failed on Node 20 across Linux, Windows and macOS — caught by the first CI run. None of the three is about SQLite, so they now use a fixture that does not need it. The library itself requires nothing newer than Node 20; only the example does, which is now documented in the README.
+- **The shipped example is still covered**, by a test that compiles `example/page.html` and is skipped with a stated reason when `node:sqlite` is unavailable.
+
 ## Unreleased — 2026-08-16 (browser namespace)
 
 ### Changed — breaking, client-side

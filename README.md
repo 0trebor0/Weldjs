@@ -237,8 +237,11 @@ Node.js 20 or newer. No dependencies.
 
 ```bash
 npm test
-npm start
 ```
+
+`npm start` runs `example/server.js`, which reads from SQLite via `node:sqlite` and
+therefore needs **Node 22.5 or newer**. The library itself does not — the test that
+compiles that example is skipped below 22.5, and everything else runs on Node 20.
 
 ## Limitations
 
