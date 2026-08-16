@@ -531,9 +531,8 @@ test('watch rebuilds a page when its file changes', async () => {
 
     // Setup code changes too, so this proves setup re-ran, not just the markup.
     fsMod.writeFileSync(target, '<h1>v2</h1><weld>const n = 99;</weld><weld var="v">return n;</weld>');
-    await new Promise((resolve) => setTimeout(resolve, 300));
 
-    assert.match((await page.renderToBuffer()).toString(), /<h1>v2<\/h1>.*\)\.v=99;/);
+    assert.match(await waitForOutput(page, /\)\.v=99;/), /<h1>v2<\/h1>.*\)\.v=99;/);
   } finally {
     watcher.close();
     fsMod.unlinkSync(target);
@@ -579,9 +578,8 @@ test('watch also rebuilds when an included file changes', async () => {
     assert.equal(watcher.files.length, 2, 'the partial was not watched');
 
     fsMod.writeFileSync(partial, '<header>two</header>');
-    await new Promise((resolve) => setTimeout(resolve, 300));
 
-    assert.match((await page.renderToBuffer()).toString(), /<header>two<\/header>/);
+    assert.match(await waitForOutput(page, /<header>two<\/header>/), /<header>two<\/header>/);
   } finally {
     watcher.close();
     fsMod.rmSync(dir, { recursive: true, force: true });
@@ -851,10 +849,9 @@ test('watch rebuilds without an onChange callback', async () => {
   const watcher = watch(page);              // no options at all
   try {
     fsMod.writeFileSync(target, '<weld var="v">return 2;</weld>');
-    await new Promise((resolve) => setTimeout(resolve, 300));
 
     // The rebuild must happen even with nothing to notify.
-    assert.match((await page.renderToBuffer()).toString(), /\)\.v=2;/);
+    assert.match(await waitForOutput(page, /\)\.v=2;/), /\)\.v=2;/);
   } finally {
     watcher.close();
     fsMod.unlinkSync(target);
@@ -876,14 +873,18 @@ test('a rebuild that fails does not crash the watcher', async () => {
     // Saving a broken file mid-edit is routine; the rejected rebuild must be
     // handled rather than surfacing as an unhandled rejection.
     fsMod.writeFileSync(target, '<weld var="v">return 1;');
-    await new Promise((resolve) => setTimeout(resolve, 300));
 
-    await assert.rejects(() => page.renderToBuffer(), /Missing <\/weld>/);
+    // Poll for the rebuild to have picked the broken file up, rather than
+    // assuming a fixed wait was long enough for the event to arrive.
+    const broke = await waitFor(
+      () => page.renderToBuffer().then(() => null, (error) => error),
+      (error) => error !== null
+    );
+    assert.match(String(broke), /Missing <\/weld>/, 'the broken file was never picked up');
 
     // And it recovers once the file is valid again.
     fsMod.writeFileSync(target, '<weld var="v">return 3;</weld>');
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    assert.match((await page.renderToBuffer()).toString(), /\)\.v=3;/);
+    assert.match(await waitForOutput(page, /\)\.v=3;/), /\)\.v=3;/);
   } finally {
     watcher.close();
     console.error = quiet;
@@ -1307,19 +1308,30 @@ test('a client that disconnects mid-write leaves no pending render', async () =>
       await new Promise((resolve) => {
         const socket = net.connect(port, '127.0.0.1', () => {
           socket.write('GET / HTTP/1.1\r\nHost: test\r\n\r\n');
-          socket.pause();                                   // never read: back the server up
-          setTimeout(() => { socket.destroy(); resolve(); }, 10);
         });
+
+        // Kill the socket once the server has actually started writing, rather
+        // than after a fixed 10 ms. On a slow machine that delay raced the
+        // server and the request was never parsed at all — on macOS CI only one
+        // of ten arrived, so the test failed without exercising the disconnect.
+        socket.once('data', () => {
+          socket.pause();                                 // never read: back the server up
+          socket.destroy();
+          resolve();
+        });
+
         socket.on('error', () => resolve());
+        socket.on('close', () => resolve());
       });
     }
 
-    await new Promise((resolve) => setTimeout(resolve, 400));
+    // Every connection reached the handler, so the disconnect is being tested.
+    assert.equal(started, 10, 'not every request was parsed before its socket died');
 
-    assert.equal(started, 10);
     // A render left awaiting 'drain' on a dead socket would leak a promise and
     // its buffers for the lifetime of the process.
-    assert.equal(settled, 10, `${started - settled} renders never completed`);
+    const done = await waitFor(() => settled, (n) => n === 10);
+    assert.equal(done, 10, `${started - done} renders never completed`);
   } finally {
     server.close();
   }
@@ -1983,10 +1995,39 @@ return { w: branch, x: branch, y: branch, z: branch };
 
 // --- watcher dependency tracking ---------------------------------------------
 
-// Waits out the 20 ms debounce plus the recompile. Generous, because these tests
-// depend on filesystem events, which are not instant on any platform.
+// Waits out the 20 ms debounce plus the recompile. Only for asserting that
+// something did *not* happen, where there is no condition to poll for.
 function settle(ms = 300) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Filesystem events are not delivered on a schedule. A fixed 300 ms was enough
+// on Linux and Windows and not on macOS, where these tests failed in CI with
+// the page still showing its pre-edit content. Polling for the condition is
+// both faster on a quick machine and correct on a slow one; the timeout only
+// comes into play when the condition never becomes true, and the last observed
+// value is returned so the caller's assertion still produces a useful message.
+const WAIT_TIMEOUT = 15000;
+
+async function waitFor(read, ok, timeout = WAIT_TIMEOUT) {
+  const deadline = Date.now() + timeout;
+  let value;
+
+  for (;;) {
+    value = await read();
+    if (ok(value)) return value;
+    if (Date.now() >= deadline) return value;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
+// Renders until the output matches, or the timeout expires.
+function waitForOutput(page, pattern, timeout = WAIT_TIMEOUT) {
+  return waitFor(
+    async () => (await page.renderToBuffer()).toString(),
+    (output) => pattern.test(output),
+    timeout
+  );
 }
 
 test('watch called immediately after load still tracks includes', async () => {
@@ -2006,14 +2047,16 @@ test('watch called immediately after load still tracks includes', async () => {
     assert.deepEqual(page.dependencies, [], 'the test did not exercise the pre-compile case');
 
     await page.ready;
-    await settle(50);                       // let the reconcile microtask run
 
-    assert.deepEqual([...watcher.files].sort(), [partial, target].sort());
+    // The reconcile is chained off page.ready, so it lands a microtask later.
+    assert.deepEqual(
+      await waitFor(() => [...watcher.files].sort(), (files) => files.length === 2),
+      [partial, target].sort()
+    );
 
     fsMod.writeFileSync(partial, '<header>two</header>');
-    await settle();
 
-    assert.match((await page.renderToBuffer()).toString(), /<header>two<\/header>/);
+    assert.match(await waitForOutput(page, /<header>two<\/header>/), /<header>two<\/header>/);
   } finally {
     watcher.close();
     fsMod.rmSync(dir, { recursive: true, force: true });
@@ -2037,16 +2080,17 @@ test('an include added after startup becomes watched', async () => {
 
     // Editing the page to pull in a partial it did not previously use.
     fsMod.writeFileSync(target, '<weld src="later.html"></weld><weld var="v">return 1;</weld>');
-    await settle();
 
-    assert.deepEqual([...watcher.files].sort(), [partial, target].sort(),
-      'the newly included file was not picked up');
+    assert.deepEqual(
+      await waitFor(() => [...watcher.files].sort(), (files) => files.length === 2),
+      [partial, target].sort(),
+      'the newly included file was not picked up'
+    );
 
     // The real point: editing that partial now rebuilds the page.
     fsMod.writeFileSync(partial, '<footer>second</footer>');
-    await settle();
 
-    assert.match((await page.renderToBuffer()).toString(), /<footer>second<\/footer>/);
+    assert.match(await waitForOutput(page, /<footer>second<\/footer>/), /<footer>second<\/footer>/);
   } finally {
     watcher.close();
     fsMod.rmSync(dir, { recursive: true, force: true });
@@ -2069,9 +2113,12 @@ test('an include removed after startup stops being watched', async () => {
     assert.equal(watcher.files.length, 2);
 
     fsMod.writeFileSync(target, '<weld var="v">return 1;</weld>');
-    await settle();
 
-    assert.deepEqual([...watcher.files], [target], 'the dropped include is still watched');
+    assert.deepEqual(
+      await waitFor(() => [...watcher.files], (files) => files.length === 1),
+      [target],
+      'the dropped include is still watched'
+    );
 
     // And it no longer triggers a rebuild: the page must stay as it is.
     const before = (await page.renderToBuffer()).toString();
@@ -2111,7 +2158,9 @@ test('repeated rebuilds do not accumulate watchers for the same file', async () 
 
     for (let i = 1; i <= 4; i += 1) {
       fsMod.writeFileSync(partial, '<header>' + i + '</header>');
-      await settle();
+      // Wait for each rebuild to land before the next write, so these are four
+      // distinct reconciles rather than writes the debounce may coalesce.
+      await waitForOutput(page, new RegExp('<header>' + i + '</header>'));
     }
   } finally {
     fsMod.watch = realWatch;
@@ -2141,8 +2190,11 @@ test('close stops rebuilds for includes as well as the page', async () => {
   await page.ready;
 
   const watcher = watch(page);
-  await settle(50);
-  assert.equal(watcher.files.length, 2);
+  assert.equal(
+    (await waitFor(() => [...watcher.files], (files) => files.length === 2)).length,
+    2,
+    'the include was never watched, so this test would pass vacuously'
+  );
   watcher.close();
 
   try {
@@ -2173,9 +2225,12 @@ test('an explicit dependency list is not overwritten by reconciliation', async (
 
   const watcher = watch(page, { dependencies: [extra] });
   try {
-    // A pinned list means exactly that list: the include is not added to it.
-    await settle(50);
+    // A pinned list is applied synchronously, and stays exactly that list: the
+    // include is never added to it, so a wait here would only hide a failure.
     assert.deepEqual([...watcher.files].sort(), [extra, target].sort());
+    await settle();
+    assert.deepEqual([...watcher.files].sort(), [extra, target].sort(),
+      'reconciliation added the include to a pinned list');
 
     fsMod.writeFileSync(extra, '{"a":1}');
     await settle();

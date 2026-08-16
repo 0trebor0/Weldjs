@@ -729,6 +729,39 @@ Verified on both: Node 20.18.1 — 130 pass, 1 skipped, 0 fail. Node 25.6.1 —
 This is exactly the class of bug CI exists to find. Every check before it ran on
 one Node version on one platform.
 
+### Second CI run: macOS only
+
+Fixing that left macOS/Node 20 failing alone — the watcher timing the matrix was
+built to catch.
+
+Diagnosis needed the log, which requires a token. The job summary turned out not
+to be exposed by the Checks API either; **annotations are**, so the workflow now
+emits the failing assertions as one. Two throwaway CI cycles to buy a readable
+failure, which beat guessing at a platform not available locally.
+
+What it showed: five watcher tests failing with the page still at its pre-edit
+content, and `a client that disconnects mid-write` reporting `started` as 1 of
+10. Both are fixed-timeout races, not product bugs.
+
+- The watcher tests slept 300 ms for a filesystem event. Enough on Linux and
+  Windows, not on macOS. They now poll for the condition.
+- The disconnect test destroyed each socket 10 ms after connecting. On a slow
+  runner that raced the server and the request was never parsed, so the test
+  passed through without exercising the disconnect. It now waits for the first
+  response byte — proof the server is mid-write — before killing the socket.
+
+Polling is stronger than sleeping here, not weaker: the assertions are unchanged
+and the timeout only applies when the condition never holds. Confirmed not
+vacuous by running against the pre-fix `compiler.js` — the three watcher
+regression tests still fail, at the timeout. The suite also got faster, 7.5 s to
+4.8 s, since a passing poll returns as soon as the event lands.
+
+One weakness noticed and left: the tests that assert a rebuild did *not* happen
+still use a fixed wait, so they would pass even if watching were entirely
+broken. `close stops rebuilds for includes as well as the page` now proves the
+include is watched before closing, which removes that risk for the one case
+where it was cheap to remove.
+
 ## Assumptions, limitations, remaining risks
 
 - **Serialization is ~35% slower** on large payloads (1.94 ms → 2.61 ms for a 224 KB

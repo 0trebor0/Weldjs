@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- **Watcher tests no longer depend on a fixed wait.** Five watcher tests slept 300 ms for a filesystem event and then asserted. That was enough on Linux and Windows and not on macOS, where CI failed with the page still showing its pre-edit content — the rebuild had not happened yet. They now poll for the condition, which is correct on a slow machine and faster on a quick one; the local suite dropped from 7.5 s to 4.8 s. The timeout only applies when the condition never becomes true, and the assertions are unchanged: all three watcher regression tests still fail against the pre-fix implementation.
+- **The mid-write disconnect test now waits for the server to start writing** before killing the socket, rather than destroying it after a fixed 10 ms. On macOS CI that delay raced the server and only one of ten requests was ever parsed, so the test failed without exercising the disconnect it exists to cover.
+
 - **The test suite no longer fails on Node 20, the minimum version `engines` claims.** Three `load()` tests used `example/page.html` as a convenient real page on disk. That page's setup block requires `node:sqlite`, which landed in Node 22.5, so all three failed on Node 20 across Linux, Windows and macOS — caught by the first CI run. None of the three is about SQLite, so they now use a fixture that does not need it. The library itself requires nothing newer than Node 20; only the example does, which is now documented in the README.
 - **The shipped example is still covered**, by a test that compiles `example/page.html` and is skipped with a stated reason when `node:sqlite` is unavailable.
 
