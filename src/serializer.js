@@ -7,9 +7,11 @@ const MAX_DEPTH = 64;
 // Bounds the total size of a single exported value. Without it, one block
 // returning an unbounded query result serializes the whole thing into the page:
 // the copy, the JSON string, and the response buffer all sit in memory at once,
-// and the client has to parse it. The budget is spent during the walk, so an
-// oversized value fails as soon as the limit is crossed rather than after the
-// whole structure has been copied.
+// and the client has to parse it.
+//
+// The limit is measured against the complete emitted `<script>` payload in UTF-8
+// bytes, summed across every block on the page — tags, nonce attribute and
+// variable name included, not just the JSON.
 const MAX_EXPORT_BYTES = 1024 * 1024;
 
 // & < > and the U+2028/U+2029 line separators are the characters that can break
@@ -24,22 +26,43 @@ function escapeChar(char) {
 // One budget covers a whole render rather than a single value. The cap exists to
 // bound the memory one request can hold, and a per-value cap does not do that: a
 // page with five blocks could produce five times the limit.
+//
+// Two counters, because they answer different questions. `bytes` is the real
+// measurement and the one the limit is defined against, but it can only be taken
+// once a value has been walked, copied and stringified — by which point the
+// memory the limit exists to bound has already been allocated. `floor` is spent
+// during the walk to stop that happening.
 function createBudget(limit = MAX_EXPORT_BYTES) {
   if (!Number.isInteger(limit) || limit < 1024) {
     throw new TypeError('Export limit must be an integer of at least 1024 bytes');
   }
 
-  return { used: 0, limit };
+  return { floor: 0, bytes: 0, limit };
 }
 
-// Approximates the serialized size as the walk proceeds. It need not match
-// JSON.stringify exactly; it must be cheap, monotonic, and never undercount by
-// enough to matter.
-function spend(budget, cost, path) {
-  budget.used += cost;
-  if (budget.used > budget.limit) {
+// Spent during the walk, before the copy is complete. Every charge below is a
+// strict lower bound on the UTF-8 bytes that member can contribute to the
+// output, so crossing the limit here proves the finished payload would cross it
+// too. Undercounting only costs a later rejection; overcounting would reject a
+// payload that actually fits, so the charges stay deliberately pessimistic in
+// the one safe direction.
+function spendFloor(budget, cost, path) {
+  budget.floor += cost;
+  if (budget.floor > budget.limit) {
     throw new TypeError(
       `Cannot export more than ${budget.limit} bytes per page; limit reached at ${path}`
+    );
+  }
+}
+
+// The authoritative check: actual UTF-8 bytes of what will be written, summed
+// across every block on the page.
+function spendBytes(budget, bytes) {
+  budget.bytes += bytes;
+  if (budget.bytes > budget.limit) {
+    throw new TypeError(
+      `Cannot export more than ${budget.limit} bytes per page; ` +
+      `the emitted <script> payload reached ${budget.bytes} bytes`
     );
   }
 }
@@ -54,7 +77,7 @@ function snapshot(value, depth, path, seen, budget) {
   }
 
   if (value === null) {
-    spend(budget, 4, path);
+    spendFloor(budget, 4, path);           // "null"
     return null;
   }
 
@@ -63,12 +86,14 @@ function snapshot(value, depth, path, seen, budget) {
   if (type === 'string') {
     // Checked before anything is copied, so a single huge string is rejected
     // without first being measured against the rest of the structure.
-    spend(budget, value.length + 2, path);
+    // A JS string is never fewer UTF-8 bytes than it is code units, and both
+    // JSON and script escaping only ever expand, so length + 2 quotes is a floor.
+    spendFloor(budget, value.length + 2, path);
     return value;
   }
 
   if (type === 'boolean') {
-    spend(budget, 5, path);
+    spendFloor(budget, 4, path);           // "true" is the shorter of the two
     return value;
   }
 
@@ -76,7 +101,7 @@ function snapshot(value, depth, path, seen, budget) {
     if (!Number.isFinite(value)) {
       throw new TypeError(`Cannot export non-finite number at ${path}`);
     }
-    spend(budget, 24, path);
+    spendFloor(budget, 1, path);           // a single digit is the shortest form
     return value;
   }
 
@@ -92,9 +117,11 @@ function snapshot(value, depth, path, seen, budget) {
   let copy;
 
   if (Array.isArray(value)) {
-    // The per-element charge is spent up front so a huge sparse or hostile array
-    // is rejected before a copy of it is allocated.
-    spend(budget, 2 + value.length, path);
+    // The brackets, plus the separating commas — one fewer than the element
+    // count. The elements themselves are charged by the recursion below, but a
+    // sparse array recurses into `undefined`, which is rejected outright, so a
+    // hostile length is still paid for before any copy is allocated.
+    spendFloor(budget, 2 + Math.max(0, value.length - 1), path);
     copy = new Array(value.length);
     for (let i = 0; i < value.length; i += 1) {
       copy[i] = snapshot(value[i], depth + 1, `${path}[${i}]`, seen, budget);
@@ -105,6 +132,7 @@ function snapshot(value, depth, path, seen, budget) {
       throw new TypeError(`Cannot export non-plain object at ${path}`);
     }
 
+    spendFloor(budget, 2, path);           // the braces
     copy = {};
     const keys = Object.keys(value);
 
@@ -119,7 +147,8 @@ function snapshot(value, depth, path, seen, budget) {
         throw new TypeError(`Cannot export "__proto__" key at ${path}`);
       }
 
-      spend(budget, key.length + 4, path);
+      // `"key":` plus the comma before every key but the first.
+      spendFloor(budget, key.length + (i === 0 ? 3 : 4), path);
       copy[key] = snapshot(value[key], depth + 1, `${path}.${key}`, seen, budget);
     }
   }
@@ -128,9 +157,16 @@ function snapshot(value, depth, path, seen, budget) {
   return copy;
 }
 
+// The floor spent during the walk is only a lower bound, and a deliberately
+// loose one: `<`, `>` and `&` each become a six-character escape, and a
+// multi-byte character costs more bytes than it does code units. A value that
+// passed the walk can still be several times the limit once written, so the
+// finished string is measured here and charged for real.
 function serialize(value, budget = createBudget()) {
   const safe = snapshot(value, 0, '$', new WeakSet(), budget);
-  return JSON.stringify(safe).replace(ESCAPE_PATTERN, escapeChar);
+  const serialized = JSON.stringify(safe).replace(ESCAPE_PATTERN, escapeChar);
+  spendBytes(budget, Buffer.byteLength(serialized, 'utf8'));
+  return serialized;
 }
 
 function assertSerializable(value, budget = createBudget()) {
@@ -144,20 +180,31 @@ function assertSerializable(value, budget = createBudget()) {
 // error. Base64 covers what crypto.randomBytes().toString('base64') produces.
 const NONCE_PATTERN = /^[A-Za-z0-9+/_-]{8,256}={0,2}$/;
 
-function clientScript(name, value, nonce, budget) {
+function clientScript(name, value, nonce, budget = createBudget()) {
   const serialized = serialize(value, budget);
+  let script;
 
   if (nonce === undefined || nonce === null) {
-    return Buffer.from(`<script>const ${name}=${serialized};</script>`);
+    script = `<script>const ${name}=${serialized};</script>`;
+  } else {
+    if (typeof nonce !== 'string' || !NONCE_PATTERN.test(nonce)) {
+      throw new TypeError(
+        'CSP nonce must be a base64-ish string of 8 to 256 characters'
+      );
+    }
+
+    script = `<script nonce="${nonce}">const ${name}=${serialized};</script>`;
   }
 
-  if (typeof nonce !== 'string' || !NONCE_PATTERN.test(nonce)) {
-    throw new TypeError(
-      'CSP nonce must be a base64-ish string of 8 to 256 characters'
-    );
-  }
+  // The limit covers the whole emitted element, so the tags, the variable name
+  // and the nonce attribute are charged too. serialize() has already charged the
+  // data, so only the wrapper is added here.
+  spendBytes(
+    budget,
+    Buffer.byteLength(script, 'utf8') - Buffer.byteLength(serialized, 'utf8')
+  );
 
-  return Buffer.from(`<script nonce="${nonce}">const ${name}=${serialized};</script>`);
+  return Buffer.from(script);
 }
 
 module.exports = {
