@@ -6,6 +6,22 @@ Measurements quoted here are reproducible from the notes in `TASK_PROGRESS.md`.
 
 ## Done
 
+- **`watch()` tracks the real dependency graph.** It no longer reads `page.dependencies`
+  synchronously (empty before the first compile), and reconciles the watched set after every
+  rebuild, so includes added or removed while the server runs are picked up. Handles are reused
+  rather than reopened, so repeated rebuilds do not accumulate them.
+- **The export limit is exact.** The finished `<script>` payload is measured with
+  `Buffer.byteLength(..., 'utf8')`. The walk-time budget is kept as an early guard but its charges
+  are now strict lower bounds, so it can no longer reject a payload that actually fits. The limit
+  is defined as the whole emitted element, summed across blocks, per render.
+- **CI.** `npm test` on Node 20/22/24 (Linux) plus Node 20 on Windows and macOS, and a packaging
+  job that installs the built tarball and requires it.
+- **Package metadata.** `repository`, `bugs`, `homepage`; `files` and `license` verified against
+  `npm pack --dry-run` and `LICENSE`.
+- **Docs audited against the implementation.** Several documented behaviours were wrong; see the
+  changelog. The README now opens with install and a copy-pasteable example, and carries an API
+  stability statement.
+
 - **Client-side global collisions.** A `<weld var="x">` whose name is also declared by a
   `<script>` on the same page is now rejected at compile time. Two `const x` declarations
   are a `SyntaxError` that disables every script on the page while the server still returns
@@ -30,6 +46,18 @@ Measurements quoted here are reproducible from the notes in `TASK_PROGRESS.md`.
 
 ## Remaining
 
+### The browser export namespace is still undecided
+
+**This is the decision blocking a wider release.** A `<weld var="x">` block still emits a bare
+`const x` global. The compile-time check catches collisions with the page's own `<script>` blocks
+but cannot see a name introduced by an external `<script src>`, so a clash with a vendor global is
+still possible and still fails the same way: a `SyntaxError` that disables every script on the page
+while the server returns 200.
+
+- **Fix:** emit into a namespace (`weld.users`). Breaking change to the client contract, which is
+  why it is deferred rather than done — but it gets more expensive with every page written.
+- **Decide before:** adding any new browser-facing API surface.
+
 ### watch() opens a file handle per file
 
 At 1,000 pages plus partials, development hits Linux's inotify limit (commonly 8,192) with
@@ -38,8 +66,10 @@ problem.
 
 - **Fix:** watch directories rather than individual files and map an event back to the
   pages it affects.
-- **Why deferred:** it is a rewrite of the watcher's bookkeeping, and it only bites in
-  development at a page count nobody has reached yet.
+- **Why deferred:** reconsidered during the dependency-tracking fix and not chosen. Per-file
+  watching with reconciliation was the smaller change and kept the existing `watcher.files`
+  contract; directory watching would have needed its own event-to-page mapping on top. It only
+  bites in development at a page count nobody has reached yet.
 
 ### Setup blocks all run at boot
 
@@ -57,16 +87,6 @@ unrecognised tag passes through as ordinary HTML. Any future change carries that
 - **Fix:** decide while the page count is small; optionally warn on tags that look like a
   WeldJS block but are not recognised.
 
-### Residual collision risk
-
-The compile-time check catches names declared by the page's own `<script>` blocks. It cannot
-see a name introduced by an external script loaded with `src`, so a collision with a vendor
-global is still possible and still fails the same way.
-
-- **Fix:** emit into a namespace (`weld.users`) rather than a bare global. This is a breaking
-  change to the client contract, which is why it was not done alongside the detection —
-  worth deciding before there are many pages.
-
 ### Literal `<weld>` inside a `<script>` body
 
 HTML entities are not decoded inside `<script>`, so `&lt;weld&gt;` there renders literally.
@@ -76,12 +96,19 @@ A script that needs the exact text must split it (`"<wel" + "d>"`).
 
 ## Coverage
 
-Every source file is at 100% line coverage. Five of six are at 100% for branches and
-functions; `compiler.js` sits at 98.3% branches and 98.0% functions.
+99.80% lines, 99.11% branches, 97.65% functions overall. Five of six source files are at 100%
+across all three; `compiler.js` is at 99.57 / 97.95 / 96.30.
 
-The residual is one uncallable expression: `Object.getPrototypeOf(async function () {})`
-exists to obtain the AsyncFunction constructor, so the inner function is never invoked and
-cannot be. It is a coverage artefact rather than untested code.
+Two residuals, both known:
+
+- `Object.getPrototypeOf(async function () {})` exists to obtain the AsyncFunction constructor,
+  so the inner function is never invoked and cannot be. A coverage artefact rather than
+  untested code.
+- The `clearTimeout` inside `watcher.close()` only executes when close lands inside the 20 ms
+  debounce window with an event already delivered. The *behaviour* is covered — "closing a
+  watcher cancels a rebuild that is still pending" asserts no rebuild happens — but whether
+  that specific branch executes depends on filesystem event timing, so it is not reliably hit.
+  Forcing it would mean a sleep-tuned test that is flaky on CI, which is worse than the gap.
 
 ## Known gaps
 
@@ -91,13 +118,23 @@ cannot be. It is a coverage artefact rather than untested code.
 - **The Express example is not executed by any test**, because Express is not a dependency.
   Its call sequence is verified against a real `http.ServerResponse`, but routing,
   `express.static` and the error middleware are not.
-- **No CI.** Every check so far has been run locally.
+- **`page.handler` without a `next` is a footgun.** It returns the promise rather than
+  swallowing the failure, which is the right contract, but
+  `http.createServer(page.handler)` therefore leaves the rejection unhandled and the first
+  failing block terminates the process. Documented in the README and API reference; consider
+  whether a `page.listener` convenience that catches and sends a 500 is worth adding.
 
 ## Verified, no longer a concern
 
 - **Backpressure with a slow client.** A 1.6 MB page served to a client stalled for 400 ms
   completed correctly, with `Content-Length` matching the body exactly. Previously tested
   only against fake response objects.
+- **The README quick start.** Copied verbatim into an empty directory and run: serves the
+  documented HTML, and returns 500 without dying when a block throws.
+- **Published package contents.** `npm pack --dry-run` produces exactly the eleven intended
+  files; CI installs the tarball into a clean project and requires it.
+- **TypeScript declarations.** Checked with `tsc --strict` against representative usage of
+  `load`, `watch`, `router`, `compileSource`, `serialize` and the page surface.
 
 ## Considered, not chosen
 

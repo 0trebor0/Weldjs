@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased — 2026-08-16 (hardening)
+
+Both this section and the one below it are unreleased; 0.1.0 has not been published. Hardening pass ahead of a wider release: two correctness fixes, an automated build, and a documentation audit against the implementation.
+
+### Fixed
+
+- **`watch()` now tracks the page's full include graph, and keeps tracking it.** The documented `load()` + `watch()` sequence registered watchers for the page only. `page.dependencies` is empty until the first compile finishes, and `watch()` read it synchronously, so a partial edited during development did not rebuild the page unless the caller happened to `await page.ready` first. The watched set is now reconciled against the page's dependencies once the initial compile settles and after every successful rebuild, so it also follows a `<weld src>` added or removed while the server runs: new includes gain a watcher, dropped ones have theirs closed. Reconciliation reuses handles it already holds rather than reopening them, so repeated rebuilds no longer accumulate watchers, and `close()` now stops later reconciliation from reopening anything. `watcher.files` is a live view rather than a snapshot taken at call time.
+- **The export size limit is now measured exactly.** The budget was spent during the walk against JavaScript string length before escaping, which undercounts the emitted payload in two ways: `<`, `>` and `&` each become a six-byte escape, and a non-ASCII character costs two to four UTF-8 bytes per code unit. A block returning 200,000 `<` characters passed a 1 MiB budget and wrote 1.2 MB into the page. The finished payload is now measured with `Buffer.byteLength(..., 'utf8')` and rejected if it exceeds the limit. The pre-serialization walk is kept as an early guard so a hopeless value still fails before the whole structure has been copied, but its charges were retuned to be strict lower bounds on the emitted bytes — previously they could also *over*count, rejecting a payload that in fact fit.
+
+### Changed
+
+- **The export limit is defined as the complete emitted `<script>` payload**, in UTF-8 bytes, summed across every block on a page, per render — tags, `const name=` declaration and `nonce` attribute included, not the JSON alone. The same data can therefore fit without a nonce and not fit with one. The default is unchanged at 1 MiB (1,048,576 bytes) and remains configurable per page with `compileSource(src, { maxExportBytes })`.
+- **A new error message reports the byte overrun**, distinct from the existing walk-time message that names the path: `Cannot export more than 1048576 bytes per page; the emitted <script> payload reached 1200028 bytes`. Both are still wrapped with the block and page that produced them.
+- **The shared-setup-scope warning is reworded as a heuristic.** It previously ended "Use const for shared resources", which implied `const` made setup state request-safe. It does not: `const cart = []` is just as shared, and mutating it from a request block leaks the same way. The warning now says so, and names *reassignable* bindings rather than "mutable" ones.
+- `Budget` objects now carry `floor` and `bytes` counters in place of `used`. This is an internal structure, exposed only through the optional second argument to `serialize()` and `assertSerializable()`.
+
+### Added
+
+- **Continuous integration** (`.github/workflows/ci.yml`). Runs on pushes to `main` and on all pull requests: `npm test` across Node 20, 22 and 24 on Linux, plus Node 20 on Windows and macOS, since the watcher depends on `fs.watch` and its event behaviour differs by platform. A separate job runs `npm pack --dry-run`, then installs the resulting tarball into a clean project and requires it, so a broken `exports` or `files` field fails the build rather than the first user.
+- **Package metadata** — `repository`, `bugs` and `homepage`. Verified that `files` publishes only the intended eleven artifacts, that the `license` field agrees with `LICENSE`, and that `engines` matches the CI matrix minimum.
+- **Regression tests for everything fixed above** (125 tests, up from 109): watching immediately after `load()`, includes added and removed while running, handle reuse across repeated rebuilds, `close()` stopping include-triggered rebuilds, pinned dependency lists surviving reconciliation, payloads landing exactly on and one byte over the limit, escape expansion for `<` `>` `&`, three-byte and astral UTF-8, the nonce counting towards the limit, and escape-heavy payloads split across blocks. Each was confirmed to fail against the previous implementation.
+
+### Documentation
+
+- **The README now opens with what WeldJS is, why to use it, how to install it, and a complete copy-pasteable example** — page, server, and the exact HTML the browser receives — followed by the architecture explanation. Adds a positioning table against template languages, SPA frameworks and client-side `fetch`, and promotes request isolation and the security boundary to top-level sections.
+- **The quick-start server no longer demonstrates a process-killing pattern.** `http.createServer(page.handler)` leaves the returned promise unhandled, so the first failing block terminates the process; verified, then replaced with the `.catch` form, which returns 500 and keeps serving. The API docs now call this out explicitly.
+- **API reference audited against the implementation.** Corrected: `router(directory, options?)` — it takes no options; the claim that each `var` block gets its own 1 MB budget — it is one budget per render; the claim that a malformed page stops the server at boot — `load()` reports on stderr, rejects `page.ready`, and keeps serving other pages; `var` being the only supported attribute — `src` exists; "no router, hot reload" in the limitations list — both shipped; and a malformed `app.get(/, page.handler)` snippet. Documented the previously undocumented `compileSource` options, `clearLoaded()`, the optional budget argument, `page.ready` being a retrying getter, and `dependencies`/`parts` being empty until the first compile.
+- **Setup scope is documented as page/process-shared state**, with its lifecycle, the three things it is for (immutable configuration, shared service instances, intentionally shared caches), and a matched unsafe/safe example pair showing that a `const` array mutated from a request block leaks across users.
+- **Added an API stability statement.** Everything is pre-1.0; the browser-side contract — a `var` block emitting a bare `const name` global — is called out as explicitly undecided and the most likely thing to change.
+- TypeScript declarations updated to match: `LoadedPage.parts` is `undefined` before the first compile, `WatchOptions.dependencies` pins rather than extends the watched set, `Watcher.files` is live, and `Budget` carries the new counters. Verified with `tsc --strict` against representative usage.
+
 ## Unreleased — 2026-08-15
 
 ### Security

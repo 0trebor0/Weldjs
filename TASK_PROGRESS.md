@@ -9,7 +9,11 @@ explicitly out of scope. A follow-up instruction required avoiding unbounded loo
 
 ## Status
 
-Complete. All 13 tests pass. Three confirmed defects fixed and verified by probe.
+Complete through the twentieth pass (hardening plan P0–P4). All 125 tests pass.
+
+Two items are outstanding and are **decisions rather than work**: the browser export
+namespace, which the user deferred, and executing the new CI workflow, which requires a
+push. Both are recorded in `TODO.md`.
 
 ## Files inspected
 
@@ -524,6 +528,108 @@ and its catch matched the word "expected" in that message. The real behaviour �
 Residual: one uncallable expression, `Object.getPrototypeOf(async function () {})`, whose
 inner function exists to yield a constructor.
 
+## Twentieth pass: hardening plan (P0–P4)
+
+Objective: work the user's WeldJS Hardening Plan. Two decisions were referred back —
+the export-limit definition (user chose **the full `<script>` payload**) and the browser
+export namespace (user chose to **defer**, so bare globals are unchanged). Everything
+else in P0–P4 was carried out.
+
+### P0-1 — watch() dependency tracking
+
+`watch()` read `page.dependencies` synchronously and fixed the watched set at call time.
+Two consequences: the documented `load()` + `watch()` sequence watched only the page,
+because dependencies are empty until the first compile finishes; and a `<weld src>` added
+or removed later was never reflected.
+
+Now: the page file is watched immediately, the set is reconciled once against whatever the
+page already knows, again when `page.ready` settles, and again after every successful
+rebuild. Handles are kept in a `path -> FSWatcher` map, so reconciliation reuses what it
+holds rather than reopening. `close()` sets a flag that stops a late reconcile from
+reopening anything. `watcher.files` became a live getter.
+
+`options.dependencies` now *pins* the set (reconciliation skipped) rather than seeding it.
+This is the one deliberate behaviour change: previously it also fixed the set, but only
+because nothing ever updated it, so no caller can depend on the difference.
+
+Directory-level watching was reconsidered per the plan and not chosen — see `TODO.md`.
+
+### P0-2 — exact export size
+
+The budget was spent during the walk against pre-escape JavaScript string length. Two
+undercounts: `<`, `>`, `&` become six-byte escapes, and non-ASCII costs 2–4 UTF-8 bytes
+per code unit. Probe: a block returning 200,000 `<` passed a 1 MiB budget and emitted
+1.2 MB.
+
+The budget now carries two counters. `floor` is spent during the walk and every charge is
+a **strict lower bound** on the bytes that member can contribute, so tripping it proves
+the output would trip too. `bytes` is the authoritative count, taken with
+`Buffer.byteLength(..., 'utf8')` on the serialized string plus the `<script>` wrapper.
+
+Retuning the floor charges downward was necessary, not cosmetic: the old ones could
+*over*count (24 bytes per number, 5 per boolean), which under an exact-limit contract
+would reject payloads that actually fit.
+
+Verified the walk-time guard still fires first where it should: the existing
+40,000-row and huge-sparse-array tests still fail on the floor, not on the exact count.
+
+### P1-3 / P3-7 / P3-8 — semantics and documentation
+
+The API reference was audited line by line against the implementation. Six documented
+behaviours were wrong; all are listed in `CHANGELOG.md`. The most consequential was the
+claim that each `var` block gets its own 1 MB budget — the opposite of what shipped in
+the eighth pass, and the sort of error that leads someone to size a page wrongly.
+
+While verifying the README's minimal server, `http.createServer(page.handler)` was found
+to terminate the process on the first failing block: without a `next`, `handler` returns
+the promise, and nothing was attached to it. Reproduced (process died, subsequent requests
+refused), then replaced with the `.catch` form and re-verified (500, server alive). The
+plan did not list this; shipping a quick start with that in it would have been worse than
+the doc bugs being fixed.
+
+### P2-5 / P2-6 — CI and packaging
+
+`.github/workflows/ci.yml`: `npm test` on Node 20/22/24 (Linux) plus Node 20 on Windows
+and macOS — the watcher depends on `fs.watch`, whose event behaviour is platform-specific,
+so the minimum version is exercised on all three. A packaging job runs `npm pack
+--dry-run`, then installs the tarball into a clean project and requires it.
+
+**Not verified:** the workflow has not been executed. It is syntactically valid YAML and
+the commands were run locally, but nothing confirms it passes on GitHub's runners until
+it is pushed. The macOS and Windows watcher timings are the most likely place to need
+adjustment.
+
+### P4-9 — regression tests
+
+109 → 125 tests. Each new test was confirmed to **fail against the previous
+implementation**: reverting `src/serializer.js` to `HEAD` fails 8, reverting
+`src/compiler.js` fails 3.
+
+### Files changed in this pass
+
+- `src/serializer.js` — two-counter budget; floor charges made strict lower bounds; exact
+  UTF-8 measurement in `serialize()` and `clientScript()`.
+- `src/compiler.js` — `watch()` rewritten around a reconciled watched set; setup-scope
+  warning reworded as a heuristic.
+- `test/weld.test.js` — 16 tests added.
+- `types/index.d.ts` — `LoadedPage.parts` widened, `WatchOptions.dependencies` and
+  `Watcher.files` documented accurately, `Budget` counters updated.
+- `docs/index.html` — request isolation, export-size definition, and API reference.
+- `README.md` — rewritten opening.
+- `package.json` — `repository`, `bugs`, `homepage`.
+- `.github/workflows/ci.yml` — new.
+- `CHANGELOG.md`, `TODO.md`, `TASK_PROGRESS.md`.
+
+### Tests run
+
+- `npm test` — **125 pass, 0 fail**.
+- `node --test --experimental-test-coverage` — 99.80% lines, 99.11% branches, 97.65%
+  functions. `compiler.js` 99.57 / 97.95 / 96.30; the other five files at 100%.
+- `npm pack --dry-run` — 11 files, 25.4 kB, exactly the intended set.
+- `tsc --strict` against representative usage of the declarations — clean.
+- README quick start copied verbatim into an empty directory and run — serves the
+  documented HTML; returns 500 and stays alive when a block throws.
+
 ## Assumptions, limitations, remaining risks
 
 - **Serialization is ~35% slower** on large payloads (1.94 ms → 2.61 ms for a 224 KB
@@ -540,14 +646,20 @@ inner function exists to yield a constructor.
   only materialises where merging actually reduces writes.
 - `MAX_DEPTH = 64` is a chosen value, not a measured limit. Legitimate data nested
   deeper than 64 levels will now be rejected.
-- `MAX_DEPTH` (64) and `MAX_EXPORT_BYTES` (1 MB) are chosen constants, not measured limits,
-  and are not configurable per page. A page with a legitimate need for a larger export has
-  no way to raise them short of editing the source.
-- Two-phase render holds every block's value in memory until the response is emitted. Each
-  is now capped at 1 MB, so a page with many blocks is bounded by block count times 1 MB.
-- The size budget approximates serialized size rather than computing it exactly. It is
-  monotonic and never undercounts enough to matter, but a value near the limit may be
-  accepted or rejected slightly off the true byte count.
+- `MAX_DEPTH` (64) and `MAX_EXPORT_BYTES` (1 MiB) are chosen values, not measured limits.
+  `MAX_EXPORT_BYTES` is configurable per page via `maxExportBytes`; `MAX_DEPTH` is still a
+  constant and can only be changed by editing the source.
+- Two-phase render holds every block's value in memory until the response is emitted. One
+  budget now covers the whole page, so a request is bounded by the limit rather than by
+  block count times the limit.
+- *(Superseded in the twentieth pass.)* The size budget previously approximated serialized
+  size rather than computing it. It is now measured exactly with `Buffer.byteLength` against
+  the emitted `<script>` payload; the walk-time estimate survives only as a strict lower
+  bound used to fail early, and can no longer reject a payload that fits.
+- The peak memory a render can hold is still somewhat above the configured limit: the
+  snapshot copy, the serialized string and the response buffer coexist, and the exact check
+  necessarily happens after the string exists. The floor bounds how far past the limit that
+  can go, but does not make it exact.
 - Time to first byte is now later by however long the slowest block takes, in exchange for
   the response completing sooner. This was the user's explicit preference.
 - `parseAttributes` loops in the scanner are bounded by the attribute text length and
