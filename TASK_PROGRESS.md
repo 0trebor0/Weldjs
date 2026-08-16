@@ -478,6 +478,52 @@ production bug and it is clean.
 Packaging verified: all 14 exported names present, `files`/`types`/`license` correct, the
 declaration file names the real exports.
 
+## Eighteenth pass: unused code audit
+
+Audited every declaration and export for actual use. No dead declarations, but four
+pieces of API surface with nothing behind them, all removed: `router()`'s options
+argument (validated then never read), `middleware.root`, the serializer's `NONCE_PATTERN`
+export, and an unused type import. `assertSerializable` and `WeldSyntaxError` were
+exported, typed and never exercised by a test; they are real API, so they were tested
+rather than removed. Every exported name is now exercised.
+
+The README still described the project as "PHP-like one-file pages", which predated
+includes and file-based routing. Updated.
+
+## Nineteenth pass: coverage to 100% lines
+
+Per-file coverage was the useful lens: every gap was an error path, and several were
+covered only by throwaway sweeps rather than the suite.
+
+| Measure | Before | After |
+| --- | --- | --- |
+| Lines | 97.41% | **99.84%** |
+| Branches | 91.47% | **99.07%** |
+| Files at 100% lines | 1 of 6 | **6 of 6** |
+| Tests | 79 | 109 |
+
+Newly covered, all reachable in real use: non-finite numbers, circular structures and
+`Date`/`Map`/`Set` returned from a block — the three things a real query most often
+produces; nested blocks, unsupported attributes, invalid variable names; includes past
+the depth limit; the mutable-setup warning; `watch` without a callback, with a bad
+dependency list, with an unwatchable dependency, closed mid-rebuild, and a rebuild that
+fails then recovers; router query strings, fragments, dotfiles, missing `next`, missing
+`url`, and merging into an existing `request.params`.
+
+Four pieces of code were deleted rather than tested, because nothing could reach them:
+the unclosed-attribute-value guard, the empty-segment check in dynamic matching, the
+trailing-whitespace break in `parseAttributes`, and the `Array.isArray` fallback for a
+page's dependency list. Removing the first required `findTagEnd` to distinguish an
+unterminated quote from an unclosed tag, which also fixed a misleading error message.
+
+One sweep assertion was found to be passing vacuously: it expected a syntax error for a
+bare trailing `<weld`, did not get one, threw its own `Error('expected a syntax error')`,
+and its catch matched the word "expected" in that message. The real behaviour — a trailing
+`<weld` with nothing after it is not a tag and passes through — is now pinned by the suite.
+
+Residual: one uncallable expression, `Object.getPrototypeOf(async function () {})`, whose
+inner function exists to yield a constructor.
+
 ## Assumptions, limitations, remaining risks
 
 - **Serialization is ~35% slower** on large payloads (1.94 ms → 2.61 ms for a 224 KB
