@@ -133,6 +133,11 @@ function parseAttributes(source, start, end) {
     const valueStart = i;
     while (i < text.length && text[i] !== quote) i += 1;
 
+    // Not reachable through scan(): findTagEnd only reports a tag end found
+    // outside quotes, so the text handed here always has balanced ones. Kept
+    // because without it an unterminated quote would silently yield a truncated
+    // attribute value rather than an error, if this function is ever called with
+    // a different range.
     if (i >= text.length) {
       throw new WeldSyntaxError(`Unclosed value for attribute "${name}"`, start + valueStart, source);
     }

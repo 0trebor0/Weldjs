@@ -9,7 +9,7 @@ const os = require('node:os');
 const net = require('node:net');
 const path = require('node:path');
 const { EventEmitter } = require('node:events');
-const { compileSource, compileFile, scan, serialize, clearShared, load, clearLoaded, router, watch, assertSerializable, WeldSyntaxError, MAX_DEPTH, MAX_EXPORT_BYTES } = require('../src');
+const { compileSource, compileFile, scan, serialize, clearShared, shared, load, clearLoaded, router, watch, assertSerializable, WeldSyntaxError, MAX_DEPTH, MAX_EXPORT_BYTES } = require('../src');
 
 test.afterEach(() => { clearShared(); clearLoaded(); });
 
@@ -542,6 +542,70 @@ test('watch also rebuilds when an included file changes', async () => {
   } finally {
     watcher.close();
     fsMod.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('router refuses two files that map to the same route', () => {
+  const dir = fsMod.mkdtempSync(path.join(os.tmpdir(), 'weld-dup-route-'));
+  fsMod.mkdirSync(path.join(dir, 'about'));
+
+  // A realistic authoring mistake: both of these want to be /about.
+  fsMod.writeFileSync(path.join(dir, 'about.html'), '<p>a</p>');
+  fsMod.writeFileSync(path.join(dir, 'about', 'index.html'), '<p>b</p>');
+
+  assert.throws(() => router(dir), /two files map to \/about/);
+
+  fsMod.rmSync(dir, { recursive: true, force: true });
+});
+
+test('router refuses a repeated parameter name in one route', () => {
+  const dir = fsMod.mkdtempSync(path.join(os.tmpdir(), 'weld-dup-param-'));
+  fsMod.mkdirSync(path.join(dir, '[id]'));
+  fsMod.writeFileSync(path.join(dir, '[id]', '[id].html'), '<p>a</p>');
+
+  assert.throws(() => router(dir), /duplicate parameter "id"/);
+
+  fsMod.rmSync(dir, { recursive: true, force: true });
+});
+
+test('shared validates its arguments', async () => {
+  await assert.rejects(() => shared('', () => 1), /non-empty string key/);
+  await assert.rejects(() => shared(null, () => 1), /non-empty string key/);
+  await assert.rejects(() => shared(42, () => 1), /non-empty string key/);
+  await assert.rejects(() => shared('k', 'not a function'), /requires a factory function/);
+  await assert.rejects(() => shared('k', null), /requires a factory function/);
+});
+
+test('a failed shared factory is evicted so it can be retried', async () => {
+  let attempts = 0;
+  const flaky = async () => {
+    attempts += 1;
+    if (attempts === 1) throw new Error('connection refused');
+    return { connected: true };
+  };
+
+  await assert.rejects(() => shared('flaky', flaky), /connection refused/);
+
+  // Caching the failure would leave the resource unavailable for the process
+  // lifetime even once whatever it depends on came back.
+  const value = await shared('flaky', flaky);
+  assert.deepEqual(value, { connected: true });
+  assert.equal(attempts, 2);
+});
+
+test('malformed weld attributes are rejected with a position', async () => {
+  const cases = [
+    ['<weld =bad>x</weld>', /Invalid <weld> attribute name/],
+    ['<weld var>x</weld>', /requires a quoted value/],
+    ['<weld var=unquoted>x</weld>', /requires a quoted value/],
+    // An unterminated quote is caught while finding the end of the tag, before
+    // attributes are parsed at all, so this is not "unclosed value".
+    ['<weld var="unclosed>x</weld>', /Unclosed <weld> opening tag/],
+    ['<weld var="a" var="b">x</weld>', /Duplicate <weld> attribute "var"/]
+  ];
+
+  for (const [source, expected] of cases) {
+    await assert.rejects(() => compileSource(source), expected, `accepted: ${source}`);
   }
 });
 
