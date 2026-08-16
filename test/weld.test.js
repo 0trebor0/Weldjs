@@ -44,8 +44,8 @@ return { count, value: base + count };
   const first = (await page.renderToBuffer()).toString();
   const second = (await page.renderToBuffer()).toString();
 
-  assert.match(first, /const value=\{"count":1,"value":11\}/);
-  assert.match(second, /const value=\{"count":2,"value":12\}/);
+  assert.match(first, /\)\.value=\{"count":1,"value":11\}/);
+  assert.match(second, /\)\.value=\{"count":2,"value":12\}/);
   assert.ok(!first.includes('<weld'));
   assert.ok(first.includes('<p>before</p>'));
   assert.ok(first.includes('<p>after</p>'));
@@ -59,7 +59,7 @@ return request.method;
 `);
 
   const output = (await page.renderToBuffer({ method: 'POST' })).toString();
-  assert.match(output, /const method="POST"/);
+  assert.match(output, /\)\.method="POST"/);
 });
 
 test('serializer prevents script-tag breakout', () => {
@@ -150,7 +150,7 @@ test('a CSP nonce on res.locals reaches the emitted script', async () => {
 
     const body = Buffer.concat(response.chunks).toString();
     assert.ok(
-      body.includes('<script nonce="r4nd0mBase64Value==">const v=1;</script>'),
+      body.includes('<script nonce="r4nd0mBase64Value==">(window.weld=window.weld||{}).v=1;</script>'),
       `${key} was not applied: ${body}`
     );
   }
@@ -160,7 +160,7 @@ test('no nonce is emitted when none is set', async () => {
   const page = await compileSource('<weld var="v">return 1;</weld>');
   const output = (await page.renderToBuffer()).toString();
 
-  assert.equal(output, '<script>const v=1;</script>');
+  assert.equal(output, '<script>(window.weld=window.weld||{}).v=1;</script>');
 });
 
 test('a malformed nonce is refused rather than escaped into the tag', async () => {
@@ -194,7 +194,7 @@ test('load returns a page synchronously and serves once compiled', async () => {
   });
 
   assert.ok(response.ended, 'response was not ended');
-  assert.match(Buffer.concat(response.chunks).toString(), /const users=/);
+  assert.match(Buffer.concat(response.chunks).toString(), /\)\.users=/);
 });
 
 test('load caches by resolved path so setup runs once', async () => {
@@ -238,7 +238,7 @@ test('a held page recovers after the file is corrected, without reloading it', a
 
   // Same object, no second load() call, no restart.
   const output = (await page.renderToBuffer()).toString();
-  assert.match(output, /const x=42;/);
+  assert.match(output, /\)\.x=42;/);
   assert.ok(Array.isArray(page.parts));
 
   fsMod.unlinkSync(target);
@@ -377,7 +377,7 @@ test('router refuses traversal, null bytes and malformed encoding', async () => 
     for (const attack of attacks) {
       const raw = await rawRequest(port, attack);
       assert.match(raw, /^HTTP\/1\.1 404 Not Found/, `${attack} was not rejected`);
-      assert.ok(!raw.includes('const page='), `${attack} served a page`);
+      assert.ok(!raw.includes('\)\.page='), `${attack} served a page`);
     }
   });
 });
@@ -484,13 +484,13 @@ test('watch rebuilds a page when its file changes', async () => {
 
   const watcher = watch(page);
   try {
-    assert.match((await page.renderToBuffer()).toString(), /<h1>v1<\/h1>.*const v=1;/);
+    assert.match((await page.renderToBuffer()).toString(), /<h1>v1<\/h1>.*\)\.v=1;/);
 
     // Setup code changes too, so this proves setup re-ran, not just the markup.
     fsMod.writeFileSync(target, '<h1>v2</h1><weld>const n = 99;</weld><weld var="v">return n;</weld>');
     await new Promise((resolve) => setTimeout(resolve, 300));
 
-    assert.match((await page.renderToBuffer()).toString(), /<h1>v2<\/h1>.*const v=99;/);
+    assert.match((await page.renderToBuffer()).toString(), /<h1>v2<\/h1>.*\)\.v=99;/);
   } finally {
     watcher.close();
     fsMod.unlinkSync(target);
@@ -511,7 +511,7 @@ test('watch stops after close and validates its arguments', async () => {
   fsMod.writeFileSync(target, '<weld var="v">return 2;</weld>');
   await new Promise((resolve) => setTimeout(resolve, 200));
 
-  assert.match((await page.renderToBuffer()).toString(), /const v=1;/, 'rebuilt after close');
+  assert.match((await page.renderToBuffer()).toString(), /\)\.v=1;/, 'rebuilt after close');
 
   assert.throws(() => watch(null), /requires a page from load/);
   assert.throws(() => watch({}), /requires a page from load/);
@@ -638,7 +638,7 @@ test('handler without next returns a promise on a loaded page too', async () => 
   await result;
 
   assert.ok(response.ended, 'response was not ended');
-  assert.match(Buffer.concat(response.chunks).toString(), /const v=1;/);
+  assert.match(Buffer.concat(response.chunks).toString(), /\)\.v=1;/);
 
   fsMod.unlinkSync(target);
 });
@@ -693,10 +693,10 @@ test('render and renderToBuffer work through a loaded page', async () => {
 
   const response = fakeResponse();
   await page.render(Object.create(null), response);
-  assert.match(Buffer.concat(response.chunks).toString(), /const v=\{"n":7\};/);
+  assert.match(Buffer.concat(response.chunks).toString(), /\)\.v=\{"n":7\};/);
 
   const buffered = await page.renderToBuffer();
-  assert.match(buffered.toString(), /const v=\{"n":7\};/);
+  assert.match(buffered.toString(), /\)\.v=\{"n":7\};/);
 
   fsMod.unlinkSync(target);
 });
@@ -811,7 +811,7 @@ test('watch rebuilds without an onChange callback', async () => {
     await new Promise((resolve) => setTimeout(resolve, 300));
 
     // The rebuild must happen even with nothing to notify.
-    assert.match((await page.renderToBuffer()).toString(), /const v=2;/);
+    assert.match((await page.renderToBuffer()).toString(), /\)\.v=2;/);
   } finally {
     watcher.close();
     fsMod.unlinkSync(target);
@@ -840,7 +840,7 @@ test('a rebuild that fails does not crash the watcher', async () => {
     // And it recovers once the file is valid again.
     fsMod.writeFileSync(target, '<weld var="v">return 3;</weld>');
     await new Promise((resolve) => setTimeout(resolve, 300));
-    assert.match((await page.renderToBuffer()).toString(), /const v=3;/);
+    assert.match((await page.renderToBuffer()).toString(), /\)\.v=3;/);
   } finally {
     watcher.close();
     console.error = quiet;
@@ -862,7 +862,7 @@ test('closing a watcher cancels a rebuild that is still pending', async () => {
   watcher.close();
   await new Promise((resolve) => setTimeout(resolve, 250));
 
-  assert.match((await page.renderToBuffer()).toString(), /const v=1;/, 'rebuilt after close');
+  assert.match((await page.renderToBuffer()).toString(), /\)\.v=1;/, 'rebuilt after close');
   fsMod.unlinkSync(target);
 });
 
@@ -891,7 +891,7 @@ test('a loaded page reports no dependencies until it has compiled', () => {
 
 test('attributes tolerate surrounding whitespace', async () => {
   const page = await compileSource('<weld   var = "spaced"   >return 1;</weld>');
-  assert.match((await page.renderToBuffer()).toString(), /const spaced=1;/);
+  assert.match((await page.renderToBuffer()).toString(), /\)\.spaced=1;/);
 
   const empty = await compileSource('<weld   >const a = 1;</weld><p>x</p>');
   assert.equal((await empty.renderToBuffer()).toString(), '<p>x</p>');
@@ -1009,7 +1009,7 @@ test('handler renders and ends the response without a wrapper', async () => {
   assert.ok(response.ended, 'handler did not end the response');
   assert.equal(
     Buffer.concat(response.chunks).toString(),
-    '<p>a</p><script>const v=1;</script><p>b</p>'
+    '<p>a</p><script>(window.weld=window.weld||{}).v=1;</script><p>b</p>'
   );
 });
 
@@ -1092,7 +1092,7 @@ test('handler serves a complete response over real HTTP', async () => {
   assert.equal(received.headers['content-type'], 'text/html; charset=utf-8');
   assert.equal(received.headers['content-length'], String(Buffer.byteLength(received.body)));
   assert.equal(received.headers['transfer-encoding'], undefined, 'fell back to chunked encoding');
-  assert.match(received.body, /const v=\{"a":1\};/);
+  assert.match(received.body, /\)\.v=\{"a":1\};/);
 });
 
 test('handler returns a promise when called without next', async () => {
@@ -1124,27 +1124,53 @@ test('WeldSyntaxError is the thrown type and carries its position', async () => 
   });
 });
 
-test('a client variable clashing with a page script is rejected', async () => {
-  // Two `const users` declarations are a SyntaxError that disables every script
-  // on the page, and the server would still return 200.
-  await assert.rejects(
-    () => compileSource('<weld var="users">return [1];</weld><script>const users = "mine";</script>'),
-    /also declared by a <script> on this page/
+test('an export no longer collides with a same-named page script declaration', async () => {
+  // This is the point of the namespace. Before it, these were rejected: two
+  // `const users` declarations are a SyntaxError that disables every script on
+  // the page while the server still returns 200. `weld.users` and a page's own
+  // `users` are now unrelated names, so both are legal.
+  await assert.doesNotReject(() =>
+    compileSource('<weld var="users">return [1];</weld><script>const users = "mine";</script>')
   );
 
-  await assert.rejects(
-    () => compileSource('<weld var="init">return 1;</weld><script>function init() {}</script>'),
-    /also declared by a <script>/
+  await assert.doesNotReject(() =>
+    compileSource('<weld var="init">return 1;</weld><script>function init() {}</script>')
   );
+
+  // And the emitted script really does keep them apart.
+  const page = await compileSource(
+    '<weld var="users">return [1];</weld><script>const users = "mine";</script>'
+  );
+  const output = (await page.renderToBuffer()).toString();
+  assert.match(output, /\)\.users=\[1\];/, 'the export was not namespaced');
+  assert.match(output, /const users = "mine";/, 'the page script was altered');
 });
 
-test('the collision check does not fire on nested or quoted occurrences', async () => {
+test('a page script declaring the namespace is rejected', async () => {
+  // `var weld` and `function weld` at the top level of a classic script write to
+  // window.weld and destroy the exports; `const weld` shadows them for the rest
+  // of that script. All three are silent server-side.
+  for (const declaration of ['var weld = {}', 'const weld = 1', 'function weld() {}', 'class weld {}']) {
+    await assert.rejects(
+      () => compileSource(`<weld var="users">return [1];</weld><script>\n${declaration}\n</script>`),
+      /declares "weld" at the top level/,
+      `${declaration} was accepted`
+    );
+  }
+});
+
+test('the namespace check does not fire on nested or quoted occurrences', async () => {
   await assert.doesNotReject(() =>
-    compileSource('<weld var="users">return [1];</weld><script>function f() { const users = 1; }</script>')
+    compileSource('<weld var="users">return [1];</weld><script>function f() { const weld = 1; }</script>')
   );
 
   await assert.doesNotReject(() =>
-    compileSource('<weld var="users">return [1];</weld><script>const s = "const users = 1";</script>')
+    compileSource('<weld var="users">return [1];</weld><script>const s = "const weld = 1";</script>')
+  );
+
+  // A page that exports nothing has no namespace to protect.
+  await assert.doesNotReject(() =>
+    compileSource('<p>a</p><script>\nconst weld = 1;\n</script>')
   );
 });
 
@@ -1366,7 +1392,7 @@ test('a page can be documented using the entity form', async () => {
 
   const output = (await page.renderToBuffer()).toString();
   assert.match(output, /Write &lt;weld var="x"&gt; to declare a block\./);
-  assert.match(output, /const v=1;/);
+  assert.match(output, /\)\.v=1;/);
 });
 
 test('page.parts is frozen through, not only at the top level', async () => {
@@ -1500,7 +1526,7 @@ test('adjacent static html is merged into one buffer per run', async () => {
   assert.equal(html[1].buffer.toString(), '<p>c</p>');
 
   const output = (await page.renderToBuffer()).toString();
-  assert.equal(output, '<p>a</p><p>b</p><script>const v=1;</script><p>c</p>');
+  assert.equal(output, '<p>a</p><p>b</p><script>(window.weld=window.weld||{}).v=1;</script><p>c</p>');
 });
 
 test('render and renderToBuffer produce identical bytes', async () => {
@@ -1531,9 +1557,9 @@ test('request blocks run concurrently, not one after another', async () => {
   const output = (await page.renderToBuffer()).toString();
   const elapsed = Date.now() - start;
 
-  assert.match(output, /const a=1;/);
-  assert.match(output, /const b=2;/);
-  assert.match(output, /const c=3;/);
+  assert.match(output, /\)\.a=1;/);
+  assert.match(output, /\)\.b=2;/);
+  assert.match(output, /\)\.c=3;/);
   // Sequential would be ~120ms; concurrent is ~40ms. 100ms separates them safely.
   assert.ok(elapsed < 100, `blocks appear to run sequentially (${elapsed}ms for 3x40ms)`);
 });
@@ -1657,7 +1683,7 @@ test('distinct variable names still compile', async () => {
   );
 
   const output = (await page.renderToBuffer()).toString();
-  assert.equal(output, '<script>const a=1;</script><script>const b=2;</script>');
+  assert.equal(output, '<script>(window.weld=window.weld||{}).a=1;</script><script>(window.weld=window.weld||{}).b=2;</script>');
 });
 
 test('emitted client script parses as valid JavaScript', async () => {
@@ -1681,15 +1707,100 @@ const name = path.basename(__filename);
 `, { filename: '/tmp/example/page.html' });
 
   const output = (await page.renderToBuffer()).toString();
-  assert.match(output, /const filename="page.html"/);
+  assert.match(output, /\)\.filename="page.html"/);
+});
+
+// --- the browser export namespace ---------------------------------------------
+
+function scriptBodies(html) {
+  return [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
+}
+
+// A context is its own realm, so objects built inside it have a different
+// Object.prototype and deepStrictEqual refuses them. Reading the namespace back
+// out through JSON both sidesteps that and proves the result is plain data.
+function browser() {
+  const context = vm.createContext({});
+  vm.runInContext('var window = this;', context);
+
+  return {
+    context,
+    run(body) { vm.runInContext(body, context); },
+    namespace() {
+      return JSON.parse(vm.runInContext('JSON.stringify(window.weld)', context));
+    }
+  };
+}
+
+// Runs every emitted <script> body in order against a fake window, which is what
+// a browser does with the page. Asserting on the resulting namespace pins the
+// contract a page author programs against, rather than the text of the emission.
+function runEmittedScripts(html) {
+  const page = browser();
+  for (const body of scriptBodies(html)) page.run(body);
+  return page.namespace();
+}
+
+test('exports land on a single window.weld namespace', async () => {
+  const page = await compileSource(`
+<weld var="users">return [{ name: 'Ada' }];</weld>
+<weld var="posts">return { total: 2 };</weld>
+<weld var="session">return null;</weld>
+`);
+
+  const weld = runEmittedScripts((await page.renderToBuffer()).toString());
+
+  assert.deepEqual(weld, { users: [{ name: 'Ada' }], posts: { total: 2 }, session: null });
+});
+
+test('the namespace guard is idempotent, so block order does not matter', async () => {
+  // Each block emits its own <script> and any of them may be first, so every one
+  // has to create the namespace if it is missing and reuse it otherwise.
+  const page = await compileSource(
+    '<weld var="a">return 1;</weld><weld var="b">return 2;</weld><weld var="c">return 3;</weld>'
+  );
+
+  const bodies = scriptBodies((await page.renderToBuffer()).toString());
+  assert.equal(bodies.length, 3);
+
+  // Every permutation must produce the same namespace.
+  for (const order of [[0, 1, 2], [2, 1, 0], [1, 2, 0]]) {
+    const page_ = browser();
+    for (const i of order) page_.run(bodies[i]);
+
+    assert.deepEqual(page_.namespace(), { a: 1, b: 2, c: 3 }, `order ${order} differed`);
+  }
+});
+
+test('an export overwrites an existing namespace property', async () => {
+  const page = await compileSource('<weld var="users">return ["from weld"];</weld>');
+  const bodies = scriptBodies((await page.renderToBuffer()).toString());
+
+  const page_ = browser();
+  page_.run('window.weld = { users: ["pre-existing"], other: 1 };');
+  page_.run(bodies[0]);
+
+  assert.deepEqual(page_.namespace(), { users: ['from weld'], other: 1 },
+    'the export did not win, or an unrelated property was discarded');
+});
+
+test('a namespaced export does not create a bare global', async () => {
+  const page = await compileSource('<weld var="users">return [1];</weld>');
+  const bodies = scriptBodies((await page.renderToBuffer()).toString());
+
+  const page_ = browser();
+  page_.run(bodies[0]);
+
+  assert.equal(page_.context.users, undefined, 'a bare global was still created');
+  assert.deepEqual(page_.namespace(), { users: [1] });
 });
 
 // --- exact export-size enforcement -------------------------------------------
 
-// `<script>const v=` and `;</script>` around the serialized value, plus its two
+// `<script>(window.weld=window.weld||{}).v=` and `;</script>` around the serialized value, plus its two
 // quotes. The limit is defined against the whole emitted element, so a test that
 // aims at an exact byte count has to include them.
-const SCRIPT_OVERHEAD = '<script>const v=;</script>'.length + 2;
+const SCRIPT_OVERHEAD = '<script>(window.weld=window.weld||{}).v=;</script>'.length + 2;
 
 function stringPage(source, limit) {
   return compileSource(`<weld var="v">return ${source};</weld>`, { maxExportBytes: limit });
@@ -1747,7 +1858,7 @@ test('an escape-heavy payload that still fits is accepted', async () => {
 
   const output = (await page.renderToBuffer()).toString();
   assert.ok(output.includes('\\u003c'.repeat(10)), 'the payload was not escaped as expected');
-  assert.ok(!output.includes('<script>const v="<'), 'a raw < reached the page');
+  assert.ok(!output.includes('<script>(window.weld=window.weld||{}).v="<'), 'a raw < reached the page');
 });
 
 test('the script wrapper and the nonce count towards the limit', async () => {
@@ -1998,7 +2109,7 @@ test('close stops rebuilds for includes as well as the page', async () => {
 
     const output = (await page.renderToBuffer()).toString();
     assert.match(output, /<header>one<\/header>/, 'an include rebuilt the page after close');
-    assert.match(output, /const v=1;/, 'the page rebuilt after close');
+    assert.match(output, /\)\.v=1;/, 'the page rebuilt after close');
   } finally {
     fsMod.rmSync(dir, { recursive: true, force: true });
   }
@@ -2025,7 +2136,7 @@ test('an explicit dependency list is not overwritten by reconciliation', async (
 
     fsMod.writeFileSync(extra, '{"a":1}');
     await settle();
-    assert.match((await page.renderToBuffer()).toString(), /const v=1;/);
+    assert.match((await page.renderToBuffer()).toString(), /\)\.v=1;/);
   } finally {
     watcher.close();
     fsMod.rmSync(dir, { recursive: true, force: true });
