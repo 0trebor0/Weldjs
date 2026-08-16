@@ -698,6 +698,179 @@ test('syntax errors report line and column, not a byte offset', async () => {
   );
 });
 
+// --- production failure modes -------------------------------------------------
+// These exercise conditions a real deployment meets constantly and that unit
+// tests with fake response objects cannot reach: clients that vanish mid-write,
+// clients that do not read, a query that throws, and concurrent users.
+
+async function serve(page) {
+  const server = http.createServer((request, response) => {
+    page.handler(request, response, () => {
+      if (!response.headersSent) {
+        response.statusCode = 503;
+        response.setHeader('content-type', 'text/plain');
+        response.end('Service Unavailable');
+      }
+    });
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  return { server, port: server.address().port };
+}
+
+function fetchPage(port, headers = {}) {
+  return new Promise((resolve) => {
+    // agent: false — the global agent keeps sockets alive for seconds after the
+    // response, which holds the event loop open long after the assertions run.
+    http.get({ host: '127.0.0.1', port, path: '/', headers, agent: false }, (response) => {
+      let body = '';
+      response.on('data', (chunk) => { body += chunk; });
+      response.on('end', () => resolve({ status: response.statusCode, headers: response.headers, body }));
+    });
+  });
+}
+
+test('a block that throws sends nothing and yields a real status', async () => {
+  const page = await compileSource(
+    '<!doctype html><h1>Dashboard</h1>\n' +
+    '<weld var="ok">return 1;</weld>\n' +
+    '<p>content that must never be half-sent</p>\n' +
+    '<weld var="rows">throw new Error("SQLITE_BUSY: database is locked");</weld>\n' +
+    '<footer>end</footer>'
+  );
+
+  const { server, port } = await serve(page);
+  try {
+    const received = await fetchPage(port);
+
+    assert.equal(received.status, 503);
+    assert.equal(received.body, 'Service Unavailable');
+    // The healthy block and the markup before the failure must not leak.
+    assert.ok(!received.body.includes('Dashboard'), 'leaked page content');
+    assert.ok(!received.body.includes('footer'), 'leaked page content');
+  } finally {
+    server.close();
+  }
+});
+
+test('a client that disconnects mid-write leaves no pending render', async () => {
+  // Large enough that write() reports backpressure and render awaits 'drain'.
+  const filler = `<p>${'x'.repeat(300)}</p>\n`;
+  const page = await compileSource(
+    `<!doctype html>${filler.repeat(1200)}<weld var="v">return 1;</weld>${filler.repeat(1200)}`
+  );
+
+  let started = 0;
+  let settled = 0;
+  const server = http.createServer(async (request, response) => {
+    started += 1;
+    try { await page.render(request, response); response.end(); } catch { /* socket died */ }
+    settled += 1;
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+
+  try {
+    for (let i = 0; i < 10; i += 1) {
+      await new Promise((resolve) => {
+        const socket = net.connect(port, '127.0.0.1', () => {
+          socket.write('GET / HTTP/1.1\r\nHost: test\r\n\r\n');
+          socket.pause();                                   // never read: back the server up
+          setTimeout(() => { socket.destroy(); resolve(); }, 10);
+        });
+        socket.on('error', () => resolve());
+      });
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 400));
+
+    assert.equal(started, 10);
+    // A render left awaiting 'drain' on a dead socket would leak a promise and
+    // its buffers for the lifetime of the process.
+    assert.equal(settled, 10, `${started - settled} renders never completed`);
+  } finally {
+    server.close();
+  }
+});
+
+test('a slow client still receives the whole page', async () => {
+  const filler = `<p>${'y'.repeat(300)}</p>\n`;
+  const page = await compileSource(`<!doctype html>${filler.repeat(900)}<weld var="v">return 1;</weld>`);
+  const expected = (await page.renderToBuffer()).length;
+
+  const { server, port } = await serve(page);
+  try {
+    const received = await new Promise((resolve, reject) => {
+      const socket = net.connect(port, '127.0.0.1', () => {
+        socket.write('GET / HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n');
+        socket.pause();                                     // stall, then drain
+        setTimeout(() => socket.resume(), 80);
+      });
+
+      const chunks = [];
+      // Cleared on completion: an uncleared guard keeps the event loop alive for
+      // its full duration after the test has already finished.
+      const guard = setTimeout(() => reject(new Error('render hung on a slow client')), 6000);
+
+      socket.on('data', (chunk) => chunks.push(chunk));
+      socket.on('end', () => { clearTimeout(guard); resolve(Buffer.concat(chunks)); });
+      socket.on('error', (error) => { clearTimeout(guard); reject(error); });
+    });
+
+    const headerEnd = received.indexOf('\r\n\r\n') + 4;
+    const bodyLength = received.length - headerEnd;
+    const declared = /content-length: (\d+)/i.exec(received.subarray(0, headerEnd).toString());
+
+    assert.ok(declared, 'no Content-Length');
+    assert.equal(Number(declared[1]), bodyLength);
+    assert.equal(bodyLength, expected);
+  } finally {
+    server.close();
+  }
+});
+
+test('concurrent users never receive each other data over HTTP', async () => {
+  const page = await compileSource(`
+<weld var="me">
+const user = request.headers['x-user'];
+await new Promise((r) => setTimeout(r, Math.floor(Math.random() * 10)));
+return { user };
+</weld>
+`);
+
+  const { server, port } = await serve(page);
+  try {
+    const users = Array.from({ length: 100 }, (_, i) => `user-${i}`);
+    const responses = await Promise.all(users.map((user) => fetchPage(port, { 'x-user': user })));
+
+    responses.forEach((received, i) => {
+      assert.equal(received.status, 200);
+      assert.match(received.body, new RegExp(`"user":"${users[i]}"`), `request ${i} got another user's data`);
+    });
+  } finally {
+    server.close();
+  }
+});
+
+test('data from storage is escaped on the way to the client', async () => {
+  // Models a value that arrived from a database rather than being written by hand.
+  const page = await compileSource(
+    '<weld var="post">return { title: "<scr" + "ipt>alert(1)</scr" + "ipt>" };</weld>'
+  );
+
+  const { server, port } = await serve(page);
+  try {
+    const received = await fetchPage(port);
+
+    assert.equal(received.status, 200);
+    assert.ok(!received.body.includes('<script>alert(1)</script>'), 'raw script tag reached the page');
+    assert.match(received.body, /\\u003cscript\\u003e/);
+  } finally {
+    server.close();
+  }
+});
+
 test('syntax errors name the file they came from', async () => {
   const dir = fsMod.mkdtempSync(path.join(os.tmpdir(), 'weld-errfile-'));
 
