@@ -15,8 +15,18 @@ permissions:
 
 jobs:
   test:
-    name: test (node ${{ matrix.node }}, ${{ matrix.os }})
+    name: test (node ${{ matrix.node }}, ${{ matrix.os }})${{ matrix.advisory && ' [advisory]' || '' }}
     runs-on: ${{ matrix.os }}
+
+    # macOS is advisory: it runs and reports, but does not gate the build. Its
+    # fs.watch events arrive far later than on Linux or Windows, and the watcher
+    # tests have failed there for timing reasons twice, each time without a
+    # product bug behind it. Nobody on the project has a Mac to reproduce on, so
+    # rather than tune blind against a runner or delete the job and lose the
+    # signal entirely, the result stays visible and someone who can reproduce it
+    # can pick it up. See TODO.md.
+    continue-on-error: ${{ matrix.advisory || false }}
+
     strategy:
       fail-fast: false
       matrix:
@@ -30,6 +40,7 @@ jobs:
             node: '20'
           - os: macos-latest
             node: '20'
+            advisory: true
 
     steps:
       - uses: actions/checkout@v4

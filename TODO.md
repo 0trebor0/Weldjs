@@ -52,6 +52,31 @@ Measurements quoted here are reproducible from the notes in `TASK_PROGRESS.md`.
 
 ## Remaining
 
+### Watcher tests are unverified on macOS — help wanted
+
+CI runs macOS as **advisory**: it reports but does not gate the build. The watcher tests have
+failed there twice, both times for timing rather than a product bug — a fixed wait for an
+`fs.watch` event that was long enough on Linux and Windows and not on macOS. The second round
+replaced those fixed waits with condition polling on a 15 s timeout, and macOS still failed.
+
+Nobody on the project has a Mac, so the remaining cause has not been reproduced. It is not
+known whether this is:
+
+- still latency, and the 15 s poll is somehow not applying to whichever assertion fails;
+- `os.tmpdir()` resolving to `/var/folders/...`, which is a symlink to `/private/var/folders/...`
+  — `path.resolve` does not resolve symlinks, so a watcher registered under one form and an
+  event delivered under the other would never match; or
+- `fs.watch` on macOS genuinely not reporting a write to a file watched by path.
+
+The symlink case is the most likely and the easiest to check first: log `fs.realpathSync` of the
+page path alongside `page.filename` inside a failing run.
+
+- **What to do:** run `npm test` on a Mac, read the actual failure, and either fix the watcher
+  or fix the test. Then remove `advisory: true` from the macOS matrix entry in
+  `.github/workflows/ci.yml`.
+- **Why it is not gating:** a permanently red build trains people to ignore it, and tuning
+  timings blind against a runner nobody can reproduce on is how tests become meaningless.
+
 ### watch() opens a file handle per file
 
 At 1,000 pages plus partials, development hits Linux's inotify limit (commonly 8,192) with
