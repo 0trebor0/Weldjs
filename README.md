@@ -30,7 +30,7 @@ Two files. Copy them, run them, and it works.
 
     <script>
       document.getElementById('list').innerHTML =
-        users.map((u) => `<li>${u.name}</li>`).join('');
+        weld.users.map((u) => `<li>${u.name}</li>`).join('');
     </script>
   </body>
 </html>
@@ -64,13 +64,13 @@ node server.js
 ```
 
 The `<weld var="users">` block ran on the server. The browser received this in its
-place, and the `<script>` below it can use `users` directly:
+place, and the `<script>` below it reads the data as `weld.users`:
 
 ```html
 <h1>Users</h1>
 <ul id="list"></ul>
 
-<script>const users=[{"name":"Ada","email":"ada@example.com"},{"name":"Grace","email":"grace@example.com"}];</script>
+<script>(window.weld=window.weld||{}).users=[{"name":"Ada","email":"ada@example.com"},{"name":"Grace","email":"grace@example.com"}];</script>
 
 <script>
   document.getElementById('list').innerHTML = ...
@@ -80,8 +80,9 @@ place, and the `<script>` below it can use `users` directly:
 That is the whole idea: **data is fetched on the server and arrives in the document**,
 with no client-side fetch, no loading state, and no serialization code to write.
 
-> **Pre-1.0.** The bare `const users` global above is the part most likely to change —
-> a namespaced `weld.users` is under consideration. See [`TODO.md`](TODO.md).
+Every export lands on one `window.weld` object — one global for the whole page, rather
+than a bare `users` that collides with whatever else the page loads. The namespace guard
+is idempotent, so block order does not matter.
 
 ## Why
 
@@ -119,7 +120,8 @@ return await db.users();
   page closure. Use it for configuration and shared clients — see
   [Request isolation](#request-isolation) before putting anything else there.
 - **`<weld var="name">`** runs **once per request** and must return JSON-compatible
-  data. At response time it becomes `<script>const name=...;</script>`.
+  data. At response time it becomes `<script>(window.weld=window.weld||{}).name=...;</script>`,
+  so the browser reads it as `weld.name`.
 - **`<weld src="partials/header.html">`** includes another file at compile time, so
   layouts cost nothing per request.
 - All non-`<weld>` HTML is retained as slices of the original Buffer.
@@ -243,9 +245,10 @@ npm start
 - Literal `<weld>` / `</weld>` sequences are reserved delimiters anywhere in the file.
 - Nested `<weld>` blocks are rejected; `var` and `src` are the only attributes.
 - Includes are flat — a page can pull in a partial, but cannot be *wrapped* by a layout.
-- Exported data becomes a bare browser global, so a collision with a third-party script
-  is possible. Collisions with the page's own `<script>` blocks are caught at compile
-  time; ones from an external `<script src>` are not.
+- Exported data lands on `window.weld`, so `weld` is the one name a page must leave alone.
+  A page that exports anything and also declares `weld` at the top level of its own
+  `<script>` fails to compile; a `weld` introduced by an external `<script src>` cannot be
+  seen at compile time.
 - No body parser, sessions, authentication, or database abstraction — by design. Express
   covers them.
 

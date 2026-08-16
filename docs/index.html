@@ -237,7 +237,7 @@ return await db.users();
 &lt;/weld&gt;
 
 &lt;script&gt;
-console.log(users);
+console.log(weld.users);
 &lt;/script&gt;</code></pre>
 </section>
 
@@ -335,13 +335,13 @@ return row ? { id: row.id, name: row.name } : { error: 'not found' };
   <p>The block is replaced at render time by a script tag, so <code>profile</code> is a normal
   variable for anything after it:</p>
 <pre><code>&lt;script&gt;
-  document.querySelector('#out').textContent = JSON.stringify(profile, null, 2);
+  document.querySelector('#out').textContent = JSON.stringify(weld.profile, null, 2);
 &lt;/script&gt;</code></pre>
 
   <p><code>GET /profile?id=1</code> and <code>?id=2</code> hit the same cached buffers and the same
   handler, differing in one line:</p>
-<pre><code>&lt;script&gt;const profile={"id":1,"name":"Rob"};&lt;/script&gt;
-&lt;script&gt;const profile={"id":2,"name":"Sarah"};&lt;/script&gt;</code></pre>
+<pre><code>&lt;script&gt;(window.weld=window.weld||{}).profile={"id":1,"name":"Rob"};&lt;/script&gt;
+&lt;script&gt;(window.weld=window.weld||{}).profile={"id":2,"name":"Sarah"};&lt;/script&gt;</code></pre>
 
   <h3 id="t-full">Finished page</h3>
 <pre><code>&lt;!doctype html&gt;
@@ -380,7 +380,7 @@ return row ? { id: row.id, name: row.name } : { error: 'not found' };
 &lt;pre id="out"&gt;&lt;/pre&gt;
 
 &lt;script&gt;
-  document.querySelector('#out').textContent = JSON.stringify(profile, null, 2);
+  document.querySelector('#out').textContent = JSON.stringify(weld.profile, null, 2);
 &lt;/script&gt;
 
 &lt;/body&gt;
@@ -615,6 +615,31 @@ return { name: currentUser };
   It must be JSON-compatible: strings, finite numbers, booleans, <code>null</code>, arrays, and
   plain objects. <code>Object.create(null)</code> is accepted.</p>
 
+  <h3>The browser contract</h3>
+
+  <p>Exports land on a single <code>window.weld</code> object, one property per
+  <code>var</code> block:</p>
+
+<pre><code>&lt;weld var="users"&gt;return await db.users();&lt;/weld&gt;
+
+emitted: &lt;script&gt;(window.weld=window.weld||{}).users=[…];&lt;/script&gt;
+browser: weld.users</code></pre>
+
+  <p>One global rather than one per export. A bare <code>const users</code> would be a name no
+  other script on the page could use, and a second declaration of it — from a CDN script the
+  compiler cannot see — is a <code>SyntaxError</code> that disables every script on the page while
+  the server still returns 200.</p>
+
+  <ul>
+    <li><strong>The guard is idempotent.</strong> Each block emits its own
+      <code>&lt;script&gt;</code> and any of them may run first, so every one creates the namespace
+      if it is missing and reuses it otherwise. Block order does not matter.</li>
+    <li><strong>Exports overwrite.</strong> If the property already exists, the export replaces it.
+      Other properties on the object are left alone.</li>
+    <li><strong>Nothing else is defined.</strong> No bare global is created; <code>weld</code> is
+      the only name the page takes.</li>
+  </ul>
+
   <p>Everything else is rejected with a <code>TypeError</code> naming the path:</p>
   <table>
     <thead><tr><th>Rejected</th><th>Why</th></tr></thead>
@@ -637,7 +662,7 @@ return { name: currentUser };
 
   <ul>
     <li><strong>The whole element counts</strong>, not just the JSON: the
-      <code>&lt;script&gt;</code> tags, the <code>const name=</code> declaration and the
+      <code>&lt;script&gt;</code> tags, the <code>window.weld</code> assignment and the
       <code>nonce</code> attribute are all charged. The same data can fit without a nonce and
       not fit with one.</li>
     <li><strong>Bytes, after escaping.</strong> <code>&lt;</code>, <code>&gt;</code> and
@@ -671,10 +696,24 @@ the emitted &lt;script&gt; payload reached 1200028 bytes</code></pre>
 
 <section id="names">
   <h2>Variable names</h2>
-  <p>The <code>var</code> attribute becomes <code>const &lt;name&gt;</code> in the emitted script, so
-  it must be a valid binding identifier and unique across the page. Both are enforced at compile
-  time — a page that would emit <code>const x</code> twice, or <code>const class</code>, fails to
-  compile rather than silently breaking every script in the browser.</p>
+  <p>The <code>var</code> attribute becomes a property on the export namespace,
+  <code>weld.&lt;name&gt;</code>. It must be a valid identifier and unique across the page, both
+  enforced at compile time.</p>
+
+  <p>Reserved words are rejected as well. As a property name a reserved word is in fact legal —
+  <code>weld.class</code> parses — but the restriction predates the namespace and is kept, since
+  relaxing it would widen what pages may declare and narrowing it again later would be breaking.</p>
+
+  <div class="warn">
+    <p><strong>Do not declare <code>weld</code> yourself.</strong> A top-level <code>var weld</code>
+    or <code>function weld</code> in one of the page's own <code>&lt;script&gt;</code> blocks writes
+    to <code>window.weld</code> and destroys the exports; a <code>const weld</code> shadows them for
+    the rest of that script. Both are silent server-side, so a page that exports anything and also
+    declares <code>weld</code> at the top level fails to compile. The check is conservative: it
+    looks only at declarations at the start of a line, so an occurrence inside a nested block or a
+    string is not mistaken for one, and a name introduced by an external
+    <code>&lt;script src&gt;</code> cannot be seen at all.</p>
+  </div>
 </section>
 
 <section id="includes">
@@ -818,11 +857,12 @@ app.get('/profile', page.handler);</code></pre>
     <p><strong>Stability: pre-1.0.</strong> Everything below works as described and is covered by
     tests, but nothing is frozen. <code>load</code>, <code>router</code>, <code>page.handler</code>,
     <code>page.render</code> and the export rules are settled in shape and unlikely to change.
-    The <strong>browser-side contract</strong> — a <code>var</code> block emitting a bare
-    <code>const name</code> global — is explicitly undecided and is the most likely thing to
-    change before 1.0; see <a href="#exporting">Exporting data</a>. Treat <code>scan</code>,
-    <code>serialize</code>, <code>assertSerializable</code> and <code>page.parts</code> as
-    internals that happen to be exported.</p>
+    The <strong>browser-side contract</strong> — a <code>var</code> block assigning to
+    <code>window.weld</code> — was settled deliberately before wider adoption and is now
+    intended to be stable; it is what a page author programs against, so it is the one thing
+    here that will not be changed casually. Treat <code>scan</code>, <code>serialize</code>,
+    <code>assertSerializable</code> and <code>page.parts</code> as internals that happen to be
+    exported.</p>
   </div>
 
   <div class="sig">load(filename)</div>
@@ -1011,7 +1051,7 @@ if (process.env.NODE_ENV !== &#39;production&#39;) watch(page);</code></pre>
   <code>&lt;/weld&gt;</code> is escaped rather than reopening a block:</p>
 
 <pre><code>request.query.payload = 'require("fs"); doSomething();'
-emitted: &lt;script&gt;const v="require(\"fs\"); doSomething();";&lt;/script&gt;   // inert data</code></pre>
+emitted: &lt;script&gt;(window.weld=window.weld||{}).v="require(\"fs\"); doSomething();";&lt;/script&gt;   // inert data</code></pre>
 
   <div class="warn">
     <p><strong>One footgun to avoid.</strong> <code>require</code> is in scope inside
@@ -1057,10 +1097,8 @@ emitted: &lt;script&gt;const v="require(\"fs\"); doSomething();";&lt;/script&gt;
     <li>Exports are capped at 1 MiB per render and 64 levels of nesting. The size limit is
       configurable per page via <code>maxExportBytes</code>; the depth limit is still a
       constant.</li>
-    <li>Exported data becomes a bare browser global (<code>const users</code>), so a name
-      collision with a third-party script is still possible. Collisions with the page's own
-      <code>&lt;script&gt;</code> blocks are caught at compile time; ones from an external
-      <code>&lt;script src&gt;</code> are not.</li>
+    <li>Exported data lands on one <code>window.weld</code> object, so the only name a page must
+      leave alone is <code>weld</code> itself.</li>
     <li><code>watch()</code> opens one file handle per watched file, which will hit the inotify
       limit on Linux at a large enough page count.</li>
   </ul>

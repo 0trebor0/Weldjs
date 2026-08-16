@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased — 2026-08-16 (browser namespace)
+
+### Changed — breaking, client-side
+
+- **Exported data is now written to a single `window.weld` namespace instead of bare globals.** `<weld var="users">` previously emitted `<script>const users=[…];</script>`, taking the name `users` as a page-wide global. It now emits `<script>(window.weld=window.weld||{}).users=[…];</script>`, and the browser reads it as `weld.users`.
+
+  **Every page that consumes exported data must be updated**: `users` becomes `weld.users`. This is a silent break — the old name is simply undefined, so scripts fail at runtime rather than at compile time.
+
+  The reason is collision. A bare `const users` is a name no other script on the page may use, and a second declaration of it is a `SyntaxError` that disables *every* script on the page while the server still returns 200. WeldJS could catch that only for the page's own `<script>` blocks; a name introduced by an external `<script src>` was invisible to it. With a namespace, `weld` is the one name a page must leave alone.
+
+  The assignment is written as a single idempotent expression because blocks are emitted independently and any of them may run first. Block order does not matter, and an export overwrites whatever the property held before while leaving other properties on the object alone.
+
+- **The compile-time collision check has been retargeted.** A `<weld var="users">` on a page whose own `<script>` declares `const users` is now **accepted** — the two names are unrelated. What is now rejected is a page that exports something *and* declares `weld` itself at the top level of one of its scripts: `var weld` and `function weld` write to `window.weld` and destroy the exports, and `const weld` shadows them for the rest of that script. The check remains conservative — only declarations at the start of a line count, and an external `<script src>` cannot be seen.
+
+- Reserved words are still rejected as export names. As a property name a reserved word is legal (`weld.class` parses), but the restriction predates the namespace and relaxing it would widen what pages may declare, so it is kept.
+
+- `NAMESPACE` is exported from the package for callers that need to reference the global by name.
+
 ## Unreleased — 2026-08-16 (hardening)
 
 Both this section and the one below it are unreleased; 0.1.0 has not been published. Hardening pass ahead of a wider release: two correctness fixes, an automated build, and a documentation audit against the implementation.

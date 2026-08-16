@@ -6,6 +6,12 @@ Measurements quoted here are reproducible from the notes in `TASK_PROGRESS.md`.
 
 ## Done
 
+- **The browser export contract is settled.** Exports land on one `window.weld` object rather
+  than bare globals, which removes the collision class entirely: `weld` is the only name a page
+  must leave alone. Breaking change to the client contract, taken deliberately while the page
+  count is small. Verified in a real browser — `weld.users` populated, no bare global created,
+  no console errors.
+
 - **`watch()` tracks the real dependency graph.** It no longer reads `page.dependencies`
   synchronously (empty before the first compile), and reconciles the watched set after every
   rebuild, so includes added or removed while the server runs are picked up. Handles are reused
@@ -46,18 +52,6 @@ Measurements quoted here are reproducible from the notes in `TASK_PROGRESS.md`.
 
 ## Remaining
 
-### The browser export namespace is still undecided
-
-**This is the decision blocking a wider release.** A `<weld var="x">` block still emits a bare
-`const x` global. The compile-time check catches collisions with the page's own `<script>` blocks
-but cannot see a name introduced by an external `<script src>`, so a clash with a vendor global is
-still possible and still fails the same way: a `SyntaxError` that disables every script on the page
-while the server returns 200.
-
-- **Fix:** emit into a namespace (`weld.users`). Breaking change to the client contract, which is
-  why it is deferred rather than done — but it gets more expensive with every page written.
-- **Decide before:** adding any new browser-facing API surface.
-
 ### watch() opens a file handle per file
 
 At 1,000 pages plus partials, development hits Linux's inotify limit (commonly 8,192) with
@@ -96,8 +90,8 @@ A script that needs the exact text must split it (`"<wel" + "d>"`).
 
 ## Coverage
 
-99.80% lines, 99.11% branches, 97.65% functions overall. Five of six source files are at 100%
-across all three; `compiler.js` is at 99.57 / 97.95 / 96.30.
+99.80% lines, 98.88% branches, 97.67% functions overall. Four of six source files are at 100%
+across all three; `compiler.js` is at 99.57 / 97.95 / 96.30 and `scanner.js` at 100 / 99.11 / 100.
 
 Two residuals, both known:
 

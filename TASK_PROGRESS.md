@@ -9,11 +9,10 @@ explicitly out of scope. A follow-up instruction required avoiding unbounded loo
 
 ## Status
 
-Complete through the twentieth pass (hardening plan P0–P4). All 125 tests pass.
+Complete through the twenty-first pass. All 130 tests pass.
 
-Two items are outstanding and are **decisions rather than work**: the browser export
-namespace, which the user deferred, and executing the new CI workflow, which requires a
-push. Both are recorded in `TODO.md`.
+One item outstanding: the new CI workflow has never been executed, which requires a
+push. Recorded in `TODO.md`.
 
 ## Files inspected
 
@@ -532,7 +531,7 @@ inner function exists to yield a constructor.
 
 Objective: work the user's WeldJS Hardening Plan. Two decisions were referred back —
 the export-limit definition (user chose **the full `<script>` payload**) and the browser
-export namespace (user chose to **defer**, so bare globals are unchanged). Everything
+export namespace (deferred at the time, then chosen — see the twenty-first pass). Everything
 else in P0–P4 was carried out.
 
 ### P0-1 — watch() dependency tracking
@@ -629,6 +628,71 @@ implementation**: reverting `src/serializer.js` to `HEAD` fails 8, reverting
 - `tsc --strict` against representative usage of the declarations — clean.
 - README quick start copied verbatim into an empty directory and run — serves the
   documented HTML; returns 500 and stays alive when a block throws.
+
+## Twenty-first pass: the browser export namespace
+
+The one item deferred from the hardening plan. User chose `window.weld`.
+
+`<weld var="users">` emitted `<script>const users=[…];</script>`, taking `users` as a
+page-wide global. It now emits `(window.weld=window.weld||{}).users=[…];` and the
+browser reads `weld.users`.
+
+Written as one idempotent assignment expression rather than a guard statement followed
+by an assignment, because blocks are emitted independently and any of them may run
+first. Every block therefore creates the namespace if missing and reuses it otherwise.
+
+### What this changed beyond the emission
+
+The compile-time collision check had to be **retargeted, not kept**. It rejected a var
+name that a page `<script>` also declared at top level — a real `SyntaxError` under bare
+globals, and a false rejection under a namespace, since `weld.users` and `const users`
+are unrelated. Leaving it would have rejected pages that are now correct.
+
+What replaced it is a genuine hazard: a page declaring `weld` itself. `var weld` and
+`function weld` at the top level of a classic script write to `window.weld` and destroy
+the exports; `const weld` shadows them for the rest of that script. All three are silent
+server-side. Rejected only on pages that actually export something.
+
+Reserved words remain rejected as export names even though `weld.class` is legal as a
+property. Relaxing it widens what pages may declare and narrowing it back would be
+breaking, so it stays — recorded rather than silently changed.
+
+### Verification
+
+Beyond the suite, the emitted scripts were executed rather than only pattern-matched:
+
+- Four tests run the emitted `<script>` bodies in a `vm` context against a fake `window`
+  and assert on the resulting namespace — including all three orderings of a
+  three-block page, overwrite semantics against a pre-existing `window.weld`, and the
+  absence of any bare global.
+- `deepStrictEqual` initially failed on realm mismatch: a `vm` context is its own realm,
+  so objects built inside it have a different `Object.prototype`. The helper reads the
+  namespace back out through `JSON.stringify` inside the context, which sidesteps that
+  and also proves the result is plain data.
+- The README quick start was **extracted programmatically from the README** and run, so
+  the documented code is the code that was tested rather than a copy that can drift.
+- Loaded in a real browser: `window.weld.users` populated, `hasOwnProperty(window,
+  'users')` false, the page's own script rendered `<li>Ada</li><li>Grace</li>`, no
+  console errors.
+
+### Files changed in this pass
+
+- `src/serializer.js` — `NAMESPACE` and the assignment form.
+- `src/scanner.js` — `declaredInPageScripts` replaced by `declaresNamespace`; the
+  reserved-word rationale corrected.
+- `src/index.js`, `types/index.d.ts` — `NAMESPACE` exported.
+- `test/weld.test.js` — 33 assertions retargeted, the two collision tests rewritten
+  around the new contract, 4 namespace-execution tests added. 126 -> 130.
+- `example/page.html`, `README.md`, `docs/index.html`, `CHANGELOG.md`, `TODO.md`.
+
+### Note on the test transform
+
+The bulk retarget of assertions was done by script and got it wrong twice before it was
+right: the first attempt emitted unescaped `)` into regex literals (syntax error), and
+both early attempts rewrote two *fixtures* — page-authored `<script>const users = …`
+strings that represent a page's own code, not WeldJS output. Reverted and redone with
+those fixtures protected. Worth recording because a bulk edit over a test file can turn
+assertions green by corrupting what they assert against.
 
 ## Assumptions, limitations, remaining risks
 
