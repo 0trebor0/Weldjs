@@ -95,11 +95,15 @@ function buildRuntimeParts(parsed, handlers) {
 // this also stops a legal but absurd depth from exhausting the stack.
 const MAX_INCLUDE_DEPTH = 16;
 
-// Setup scope is shared by every request for the life of the process, so request
-// data placed there leaks between users. The leak needs a mutable binding, and
-// it is invisible without concurrency, so a top-level let/var in a setup block is
-// worth flagging even though the check is only a heuristic: const bindings, which
-// cannot be reassigned, are what setup scope is for.
+// Setup scope is one closure shared by every request for the life of the
+// process, so request data placed there leaks between users. A reassignable
+// top-level binding is the cheapest signal that this might be happening, and the
+// leak is invisible without concurrency, so it is worth flagging.
+//
+// It is only a signal. const is not a safety guarantee: `const cart = []` is
+// just as shared, and pushing to it from a request block leaks exactly the same
+// way. The warning cannot see that, which is why its wording avoids promising
+// that const is the fix.
 const MUTABLE_SETUP_BINDING = /^[ \t]*(let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)/gm;
 
 function warnAboutMutableSetup(parsed, filename) {
@@ -117,9 +121,11 @@ function warnAboutMutableSetup(parsed, filename) {
   if (names.length === 0) return;
 
   console.warn(
-    `WeldJS: ${filename} declares mutable setup bindings (${names.join(', ')}). ` +
-    'Setup scope is shared by every request, so anything derived from a request ' +
-    'must live inside a <weld var> block instead. Use const for shared resources.'
+    `WeldJS: ${filename} declares reassignable setup bindings (${names.join(', ')}). ` +
+    'Setup scope is shared by every request for the life of the process, so ' +
+    'anything derived from a request must live inside a <weld var> block instead. ' +
+    'This is a heuristic, not a safety check: const does not make setup state ' +
+    'request-safe either, because a const object can still be mutated.'
   );
 }
 
@@ -529,14 +535,20 @@ function load(filename) {
 // page is never watched twice.
 const watchers = new Map();
 
-// Recompiles a page when its file changes. Development only: it holds an open
-// file watcher and lets a running server pick up edits without a restart.
+// Recompiles a page when its file, or any file it includes, changes. Development
+// only: it holds open file watchers and lets a running server pick up edits
+// without a restart.
 //
 //   const page = load('./page.html');
 //   if (process.env.NODE_ENV !== 'production') watch(page);
 //
-// dependencies lets a page declare other files that should also trigger a
-// rebuild. Nothing produces them yet; includes will.
+// The include graph is not known until the page has compiled, and it changes
+// whenever a <weld src> is added or removed, so the watched set is not fixed at
+// call time. It is reconciled against page.dependencies once the initial compile
+// settles and again after every successful rebuild.
+//
+// options.dependencies pins the set instead, for a page whose related files are
+// not expressible as includes. Pinned means pinned: reconciliation is skipped.
 function watch(page, options = {}) {
   if (page === null || typeof page !== 'object' || typeof page.filename !== 'string') {
     throw new TypeError('watch() requires a page from load()');
@@ -551,53 +563,125 @@ function watch(page, options = {}) {
 
   const onChange = typeof options.onChange === 'function' ? options.onChange : null;
 
-  // Files pulled in by <weld src> are watched too, so editing a shared header
-  // rebuilds every page that includes it. They are read from the compiled page
-  // when it is available; an explicit list overrides that.
-  // Both a loaded and a compiled page expose dependencies as an array, so no
-  // fallback is needed for the page's own list.
-  const dependencies = Array.isArray(options.dependencies)
-    ? options.dependencies
-    : page.dependencies;
+  let pinned = null;
+  if (Array.isArray(options.dependencies)) {
+    for (const dependency of options.dependencies) {
+      if (typeof dependency !== 'string' || dependency.length === 0) {
+        throw new TypeError('watch() dependencies must be non-empty strings');
+      }
+    }
+    pinned = options.dependencies.map((file) => path.resolve(file));
+  }
 
-  for (const dependency of dependencies) {
-    if (typeof dependency !== 'string' || dependency.length === 0) {
-      throw new TypeError('watch() dependencies must be non-empty strings');
+  // Every file this watcher is responsible for, whether or not a handle could
+  // actually be opened for it, and the handles that were opened. They differ
+  // when a file is missing: reporting the intent is more useful than reporting
+  // what the OS happened to allow.
+  const wanted = new Set([page.filename]);
+  const handles = new Map();
+  // Suppresses a repeated error for the same unwatchable file. Reconciliation
+  // still retries it, so a partial that is deleted and restored recovers.
+  const reported = new Set();
+  let closed = false;
+  let timer = null;
+
+  function watchFile(target) {
+    if (handles.has(target)) return;
+
+    try {
+      handles.set(target, fs.watch(target, { persistent: false }, rebuild));
+      reported.delete(target);
+    } catch (error) {
+      // A dependency that cannot be watched should not stop the others.
+      if (!reported.has(target)) {
+        reported.add(target);
+        console.error(`WeldJS: cannot watch ${target}: ${error.message}`);
+      }
     }
   }
 
-  const targets = [page.filename, ...dependencies.map((file) => path.resolve(file))];
-  const handles = [];
+  function unwatchFile(target) {
+    const handle = handles.get(target);
+    if (handle === undefined) return;
+    handle.close();
+    handles.delete(target);
+  }
+
+  // Brings the watched set in line with the page's current include graph:
+  // handles for files no longer referenced are closed, and files newly pulled in
+  // get one. Without this, an include added after startup would never rebuild
+  // the page, and one removed would keep a handle open for the life of the
+  // process.
+  function reconcile() {
+    if (closed || pinned !== null) return;
+
+    const current = new Set([page.filename, ...page.dependencies]);
+
+    for (const target of wanted) {
+      if (!current.has(target)) {
+        unwatchFile(target);
+        wanted.delete(target);
+        reported.delete(target);
+      }
+    }
+
+    for (const target of current) {
+      wanted.add(target);
+      watchFile(target);
+    }
+  }
 
   // Editors often write a file as several events; a short debounce collapses
   // them into one rebuild instead of compiling the same file three times.
-  let timer = null;
-  const rebuild = () => {
+  function rebuild() {
     if (timer !== null) clearTimeout(timer);
     timer = setTimeout(() => {
       timer = null;
       const invalidated = page.invalidate();
       if (onChange) onChange(page);
-      invalidated.catch(() => {});   // failures already report through page.ready
+      // failures already report through page.ready; a successful rebuild may
+      // have changed the include graph, so the watched set is reconciled to it.
+      invalidated.then(reconcile, () => {});
     }, 20);
     if (typeof timer.unref === 'function') timer.unref();
-  };
+  }
 
-  for (const target of targets) {
-    try {
-      handles.push(fs.watch(target, { persistent: false }, rebuild));
-    } catch (error) {
-      // A dependency that cannot be watched should not stop the others.
-      console.error(`WeldJS: cannot watch ${target}: ${error.message}`);
+  // The page file itself is watched immediately, so an edit is caught even
+  // before the first compile has finished.
+  watchFile(page.filename);
+
+  if (pinned !== null) {
+    for (const target of pinned) {
+      wanted.add(target);
+      watchFile(target);
+    }
+  } else {
+    // Whatever the page already knows: a page awaited before being watched has
+    // its full include graph available right now, and callers read
+    // watcher.files immediately.
+    reconcile();
+
+    // page.dependencies is empty until compilation produces it, which is why
+    // watch(page) called straight after load(page) used to watch nothing but the
+    // page itself. Wait for the compile load() already started, then reconcile.
+    if (page.ready !== undefined && typeof page.ready.then === 'function') {
+      page.ready.then(reconcile, () => {});
     }
   }
 
   const watcher = Object.freeze({
     page,
-    files: Object.freeze(targets.slice()),
+    // A getter, not a snapshot: the set changes as includes come and go.
+    get files() {
+      return Object.freeze([...wanted]);
+    },
     close() {
-      if (timer !== null) clearTimeout(timer);
-      for (const handle of handles) handle.close();
+      closed = true;
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      for (const target of [...handles.keys()]) unwatchFile(target);
       watchers.delete(page.filename);
     }
   });
