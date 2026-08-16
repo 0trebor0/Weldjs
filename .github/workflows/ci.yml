@@ -40,7 +40,35 @@ jobs:
 
       # No dependencies and no lockfile, so there is nothing to install.
       - name: Test
-        run: npm test
+        id: test
+        run: npm test 2>&1 | tee test-output.txt; exit "${PIPESTATUS[0]}"
+        shell: bash
+
+      # Raw job logs need a token to fetch, which makes a platform-specific
+      # failure awkward to diagnose from outside the repo. The job summary is
+      # published on the check run, so the failing assertions are readable
+      # without one.
+      - name: Report failing tests
+        if: failure() && steps.test.outcome == 'failure'
+        shell: bash
+        run: |
+          {
+            echo "### ${{ matrix.os }} / node ${{ matrix.node }}"
+            echo
+            echo '```'
+            grep -E '^(not ok|# (tests|pass|fail|skipped))' test-output.txt || true
+            echo '```'
+            echo
+            echo '<details><summary>Failure detail</summary>'
+            echo
+            echo '```'
+            sed -n '/^# Subtest/,$p' test-output.txt | grep -E \
+              'not ok|error:|code:|expected:|actual:|failureType:|AssertionError|Error:|at ' \
+              | head -80 || true
+            echo '```'
+            echo
+            echo '</details>'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   package:
     name: package
