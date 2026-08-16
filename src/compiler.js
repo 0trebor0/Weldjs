@@ -554,9 +554,11 @@ function watch(page, options = {}) {
   // Files pulled in by <weld src> are watched too, so editing a shared header
   // rebuilds every page that includes it. They are read from the compiled page
   // when it is available; an explicit list overrides that.
+  // Both a loaded and a compiled page expose dependencies as an array, so no
+  // fallback is needed for the page's own list.
   const dependencies = Array.isArray(options.dependencies)
     ? options.dependencies
-    : (Array.isArray(page.dependencies) ? page.dependencies : []);
+    : page.dependencies;
 
   for (const dependency of dependencies) {
     if (typeof dependency !== 'string' || dependency.length === 0) {

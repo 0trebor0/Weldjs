@@ -102,7 +102,7 @@ function matchDynamic(dynamicByLength, segments) {
       const param = PARAM_PATTERN.exec(pattern);
 
       if (param) {
-        if (segments[i].length === 0) { matched = false; break; }
+        // Segments are non-empty by construction: pathSegments filters them.
         values[param[1]] = segments[i];
         continue;
       }

@@ -74,6 +74,15 @@ A script that needs the exact text must split it (`"<wel" + "d>"`).
 
 - **Fix:** an explicit escape or ignore directive, if this ever comes up in practice.
 
+## Coverage
+
+Every source file is at 100% line coverage. Five of six are at 100% for branches and
+functions; `compiler.js` sits at 98.3% branches and 98.0% functions.
+
+The residual is one uncallable expression: `Object.getPrototypeOf(async function () {})`
+exists to obtain the AsyncFunction constructor, so the inner function is never invoked and
+cannot be. It is a coverage artefact rather than untested code.
+
 ## Known gaps
 
 - **A persistently broken page recompiles on every request** (0.45 ms versus 0.012 ms

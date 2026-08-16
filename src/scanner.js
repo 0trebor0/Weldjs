@@ -75,8 +75,14 @@ function findOpeningTag(source, from) {
   return -1;
 }
 
+// Reports why the tag end was not found, not just that it was not: an
+// unterminated attribute value and a genuinely unclosed tag look identical from
+// a bare -1, and they need different messages. Distinguishing them here also
+// makes the quotes provably balanced for parseAttributes, which would otherwise
+// need its own guard against a case it can never see.
 function findTagEnd(source, start) {
   let quote = 0;
+  let quoteAt = -1;
 
   for (let i = start; i < source.length; i += 1) {
     const byte = source[i];
@@ -88,13 +94,14 @@ function findTagEnd(source, start) {
 
     if (byte === 0x22 || byte === 0x27) { // " or '
       quote = byte;
+      quoteAt = i;
       continue;
     }
 
-    if (byte === GT) return i;
+    if (byte === GT) return { end: i };
   }
 
-  return -1;
+  return quote ? { unterminatedQuoteAt: quoteAt } : { end: -1 };
 }
 
 function parseAttributes(source, start, end) {
@@ -105,8 +112,9 @@ function parseAttributes(source, start, end) {
   let i = 0;
 
   while (i < text.length) {
+    // No trailing-whitespace check is needed: text is trimmed, so skipping
+    // whitespace here can never run to the end.
     while (i < text.length && /\s/.test(text[i])) i += 1;
-    if (i >= text.length) break;
 
     const nameStart = i;
     while (i < text.length && /[A-Za-z0-9_$:-]/.test(text[i])) i += 1;
@@ -131,16 +139,9 @@ function parseAttributes(source, start, end) {
 
     i += 1;
     const valueStart = i;
+    // Guaranteed to terminate: findTagEnd rejects the tag outright if a quote is
+    // never closed, so the text handed here always has balanced quotes.
     while (i < text.length && text[i] !== quote) i += 1;
-
-    // Not reachable through scan(): findTagEnd only reports a tag end found
-    // outside quotes, so the text handed here always has balanced ones. Kept
-    // because without it an unterminated quote would silently yield a truncated
-    // attribute value rather than an error, if this function is ever called with
-    // a different range.
-    if (i >= text.length) {
-      throw new WeldSyntaxError(`Unclosed value for attribute "${name}"`, start + valueStart, source);
-    }
 
     if (Object.prototype.hasOwnProperty.call(attrs, name)) {
       throw new WeldSyntaxError(`Duplicate <weld> attribute "${name}"`, start + nameStart, source);
@@ -215,10 +216,21 @@ function scan(input) {
       parts.push({ type: 'html', start: cursor, end: tagStart });
     }
 
-    const openEnd = findTagEnd(source, tagStart + OPEN.length);
-    if (openEnd === -1) {
+    const tagEnd = findTagEnd(source, tagStart + OPEN.length);
+
+    if (tagEnd.unterminatedQuoteAt !== undefined) {
+      throw new WeldSyntaxError(
+        'Unterminated attribute value in <weld> tag',
+        tagEnd.unterminatedQuoteAt,
+        source
+      );
+    }
+
+    if (tagEnd.end === -1) {
       throw new WeldSyntaxError('Unclosed <weld> opening tag', tagStart, source);
     }
+
+    const openEnd = tagEnd.end;
 
     const closeStart = source.indexOf(CLOSE, openEnd + 1);
     if (closeStart === -1) {

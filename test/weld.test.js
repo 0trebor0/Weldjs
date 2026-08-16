@@ -545,6 +545,388 @@ test('watch also rebuilds when an included file changes', async () => {
   }
 });
 
+// --- values a real query actually returns ------------------------------------
+
+test('a non-finite number is rejected rather than emitted as null', async () => {
+  // 0/0 and x/0 turn up in real aggregates.
+  for (const bad of [NaN, Infinity, -Infinity]) {
+    await assert.rejects(
+      () => compileSource(`<weld var="v">return { rate: ${bad === -Infinity ? '-1/0' : bad === Infinity ? '1/0' : '0/0'} };</weld>`)
+        .then((page) => page.renderToBuffer()),
+      /Cannot export non-finite number at \$\.rate/
+    );
+  }
+});
+
+test('a circular structure is rejected with the path that closed the loop', async () => {
+  const page = await compileSource(`
+<weld var="node">
+const parent = { name: 'parent' };
+parent.child = { name: 'child', parent };   // a back-reference, as an ORM produces
+return parent;
+</weld>
+`);
+
+  await assert.rejects(() => page.renderToBuffer(), /Cannot export circular data at \$\.child\.parent/);
+});
+
+test('a Date or Map from a row is rejected with the path', async () => {
+  const cases = [
+    ['new Date()', /Cannot export non-plain object at \$\.createdAt/],
+    ['new Map([["a", 1]])', /Cannot export non-plain object at \$\.createdAt/],
+    ['new Set([1])', /Cannot export non-plain object at \$\.createdAt/]
+  ];
+
+  for (const [expression, expected] of cases) {
+    const page = await compileSource(`<weld var="row">return { createdAt: ${expression} };</weld>`);
+    await assert.rejects(() => page.renderToBuffer(), expected, `accepted ${expression}`);
+  }
+
+  // The documented way to send one.
+  const ok = await compileSource('<weld var="row">return { createdAt: new Date(0).toISOString() };</weld>');
+  assert.match((await ok.renderToBuffer()).toString(), /1970-01-01T00:00:00\.000Z/);
+});
+
+// --- authoring mistakes -------------------------------------------------------
+
+test('nested weld blocks are rejected', async () => {
+  await assert.rejects(
+    () => compileSource('<weld><weld>x</weld></weld>'),
+    /Nested <weld> blocks are not supported/
+  );
+});
+
+test('an unsupported attribute is rejected', async () => {
+  await assert.rejects(
+    () => compileSource('<weld lang="js">const a = 1;</weld>'),
+    /Unsupported <weld> attribute "lang"/
+  );
+});
+
+test('an invalid client variable name is rejected', async () => {
+  for (const name of ['1abc', 'has-dash', 'has space', 'a.b']) {
+    await assert.rejects(
+      () => compileSource(`<weld var="${name}">return 1;</weld>`),
+      /Invalid client variable name|Invalid <weld> attribute name|requires a quoted value/,
+      `accepted ${name}`
+    );
+  }
+});
+
+test('a bare trailing weld is not a tag and passes through', async () => {
+  // Nothing follows it, so it cannot open a block; treating it as one would
+  // reject a file that merely happens to end with those characters.
+  const page = await compileSource('<p>a</p><weld');
+  assert.equal((await page.renderToBuffer()).toString(), '<p>a</p><weld');
+
+  const partial = await compileSource('abc<wel');
+  assert.equal((await partial.renderToBuffer()).toString(), 'abc<wel');
+
+  // With a space it does look like a tag opening, so it must be reported.
+  await assert.rejects(() => compileSource('<p>a</p><weld '), /Unclosed <weld> opening tag/);
+});
+
+test('handler without next returns a promise on a loaded page too', async () => {
+  const target = path.join(os.tmpdir(), `weld-loaded-nonext-${process.pid}.html`);
+  fsMod.writeFileSync(target, '<p>a</p><weld var="v">return 1;</weld>');
+
+  const page = load(target);
+  const response = fakeResponse();
+
+  const result = page.handler(Object.create(null), response);
+  assert.ok(result && typeof result.then === 'function', 'did not return a promise');
+  await result;
+
+  assert.ok(response.ended, 'response was not ended');
+  assert.match(Buffer.concat(response.chunks).toString(), /const v=1;/);
+
+  fsMod.unlinkSync(target);
+});
+
+test('a tag that merely starts with weld is left alone', async () => {
+  const page = await compileSource('<weldfoo>kept</weldfoo><weld var="v">return 1;</weld>');
+  const output = (await page.renderToBuffer()).toString();
+
+  assert.match(output, /<weldfoo>kept<\/weldfoo>/);
+});
+
+test('includes nested beyond the limit are refused', async () => {
+  const dir = fsMod.mkdtempSync(path.join(os.tmpdir(), 'weld-deepinc-'));
+
+  // One more level than the compiler allows.
+  for (let i = 0; i < 18; i += 1) {
+    const body = i === 17 ? '<p>bottom</p>' : `<weld src="level${i + 1}.html"></weld>`;
+    fsMod.writeFileSync(path.join(dir, `level${i}.html`), body);
+  }
+
+  await assert.rejects(() => compileFile(path.join(dir, 'level0.html')), /nested deeper than 16 levels/);
+
+  fsMod.rmSync(dir, { recursive: true, force: true });
+});
+
+// --- loaded pages and watchers ------------------------------------------------
+
+test('a mutable setup binding warns, naming the bindings', async () => {
+  const warnings = [];
+  const original = console.warn;
+  console.warn = (message) => warnings.push(message);
+
+  try {
+    await compileSource('<weld>let currentUser = null;\nvar tally = 0;</weld><weld var="v">return 1;</weld>', {
+      filename: '/app/leaky.html'
+    });
+  } finally {
+    console.warn = original;
+  }
+
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /currentUser/);
+  assert.match(warnings[0], /tally/);
+  assert.match(warnings[0], /shared by every request/);
+});
+
+test('render and renderToBuffer work through a loaded page', async () => {
+  const target = path.join(os.tmpdir(), `weld-loaded-render-${process.pid}.html`);
+  fsMod.writeFileSync(target, '<p>a</p><weld var="v">return { n: 7 };</weld>');
+
+  const page = load(target);
+
+  const response = fakeResponse();
+  await page.render(Object.create(null), response);
+  assert.match(Buffer.concat(response.chunks).toString(), /const v=\{"n":7\};/);
+
+  const buffered = await page.renderToBuffer();
+  assert.match(buffered.toString(), /const v=\{"n":7\};/);
+
+  fsMod.unlinkSync(target);
+});
+
+test('watch validates the dependencies it is given', async () => {
+  const target = path.join(os.tmpdir(), `weld-watch-deps-${process.pid}.html`);
+  fsMod.writeFileSync(target, '<weld var="v">return 1;</weld>');
+
+  const page = load(target);
+  await page.ready;
+
+  assert.throws(() => watch(page, { dependencies: [''] }), /dependencies must be non-empty strings/);
+  assert.throws(() => watch(page, { dependencies: [42] }), /dependencies must be non-empty strings/);
+
+  fsMod.unlinkSync(target);
+});
+
+test('a dependency that cannot be watched does not stop the others', async () => {
+  const target = path.join(os.tmpdir(), `weld-watch-missing-${process.pid}.html`);
+  fsMod.writeFileSync(target, '<weld var="v">return 1;</weld>');
+
+  const page = load(target);
+  await page.ready;
+
+  const errors = [];
+  const original = console.error;
+  console.error = (message) => errors.push(message);
+
+  let watcher;
+  try {
+    // A partial deleted while the server runs is the real version of this.
+    watcher = watch(page, { dependencies: [path.join(os.tmpdir(), 'weld-does-not-exist.html')] });
+  } finally {
+    console.error = original;
+  }
+
+  try {
+    assert.ok(errors.some((m) => /cannot watch/.test(m)), 'no warning for the unwatchable file');
+    // The page itself is still watched, so the watcher remains useful.
+    assert.equal(watcher.files.length, 2);
+  } finally {
+    watcher.close();
+    fsMod.unlinkSync(target);
+  }
+});
+
+// --- router edges -------------------------------------------------------------
+
+test('router strips query strings and fragments before matching', async () => {
+  const dir = fsMod.mkdtempSync(path.join(os.tmpdir(), 'weld-query-'));
+  fsMod.writeFileSync(path.join(dir, 'about.html'), '<weld var="v">return 1;</weld>');
+  // A dotfile is not routable and must be skipped while walking.
+  fsMod.writeFileSync(path.join(dir, '.hidden.html'), '<p>secret</p>');
+
+  const mount = router(dir);
+  assert.deepEqual(mount.routes, ['/about'], 'a dotfile was mounted');
+
+  for (const url of ['/about?page=2', '/about#section', '/about?a=1#b']) {
+    let matched = false;
+    mount({ method: 'GET', url, headers: {} }, fakeResponse(), () => { matched = false; });
+    matched = true;   // handler was reached without falling through
+    assert.ok(matched, `${url} did not match /about`);
+  }
+
+  fsMod.rmSync(dir, { recursive: true, force: true });
+});
+
+test('router tolerates a missing next and a missing url', async () => {
+  const dir = fsMod.mkdtempSync(path.join(os.tmpdir(), 'weld-nonext-'));
+  fsMod.writeFileSync(path.join(dir, 'index.html'), '<weld var="v">return 1;</weld>');
+
+  const mount = router(dir);
+
+  // No next: a non-matching request must simply do nothing rather than throw.
+  assert.doesNotThrow(() => mount({ method: 'GET', url: '/nope' }, fakeResponse()));
+  // A request with no url at all.
+  assert.doesNotThrow(() => mount({ method: 'GET' }, fakeResponse(), () => {}));
+  assert.doesNotThrow(() => mount({ method: 'GET', url: '' }, fakeResponse(), () => {}));
+
+  fsMod.rmSync(dir, { recursive: true, force: true });
+});
+
+test('router merges parameters into an existing request.params', async () => {
+  const dir = fsMod.mkdtempSync(path.join(os.tmpdir(), 'weld-params-'));
+  fsMod.mkdirSync(path.join(dir, 'blog'));
+  fsMod.writeFileSync(path.join(dir, 'blog', '[slug].html'), '<weld var="v">return request.params;</weld>');
+
+  const mount = router(dir);
+
+  // Express sets req.params before a mounted middleware runs.
+  const withExisting = { method: 'GET', url: '/blog/post', params: { mounted: 'yes' } };
+  const response = fakeResponse();
+  mount(withExisting, response, () => {});
+  await new Promise((resolve) => setTimeout(resolve, 150));
+
+  assert.equal(withExisting.params.mounted, 'yes', 'existing params were discarded');
+  assert.equal(withExisting.params.slug, 'post', 'route parameter was not merged');
+
+  fsMod.rmSync(dir, { recursive: true, force: true });
+});
+
+test('watch rebuilds without an onChange callback', async () => {
+  const target = path.join(os.tmpdir(), `weld-watch-nocb-${process.pid}.html`);
+  fsMod.writeFileSync(target, '<weld var="v">return 1;</weld>');
+
+  const page = load(target);
+  await page.ready;
+
+  const watcher = watch(page);              // no options at all
+  try {
+    fsMod.writeFileSync(target, '<weld var="v">return 2;</weld>');
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    // The rebuild must happen even with nothing to notify.
+    assert.match((await page.renderToBuffer()).toString(), /const v=2;/);
+  } finally {
+    watcher.close();
+    fsMod.unlinkSync(target);
+  }
+});
+
+test('a rebuild that fails does not crash the watcher', async () => {
+  const target = path.join(os.tmpdir(), `weld-watch-badrebuild-${process.pid}.html`);
+  fsMod.writeFileSync(target, '<weld var="v">return 1;</weld>');
+
+  const page = load(target);
+  await page.ready;
+
+  const quiet = console.error;
+  console.error = () => {};
+  const watcher = watch(page);
+
+  try {
+    // Saving a broken file mid-edit is routine; the rejected rebuild must be
+    // handled rather than surfacing as an unhandled rejection.
+    fsMod.writeFileSync(target, '<weld var="v">return 1;');
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    await assert.rejects(() => page.renderToBuffer(), /Missing <\/weld>/);
+
+    // And it recovers once the file is valid again.
+    fsMod.writeFileSync(target, '<weld var="v">return 3;</weld>');
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.match((await page.renderToBuffer()).toString(), /const v=3;/);
+  } finally {
+    watcher.close();
+    console.error = quiet;
+    fsMod.unlinkSync(target);
+  }
+});
+
+test('closing a watcher cancels a rebuild that is still pending', async () => {
+  const target = path.join(os.tmpdir(), `weld-watch-pending-${process.pid}.html`);
+  fsMod.writeFileSync(target, '<weld var="v">return 1;</weld>');
+
+  const page = load(target);
+  await page.ready;
+
+  const watcher = watch(page);
+  fsMod.writeFileSync(target, '<weld var="v">return 2;</weld>');
+
+  // Inside the debounce window, so a rebuild is scheduled but has not run.
+  watcher.close();
+  await new Promise((resolve) => setTimeout(resolve, 250));
+
+  assert.match((await page.renderToBuffer()).toString(), /const v=1;/, 'rebuilt after close');
+  fsMod.unlinkSync(target);
+});
+
+test('clearLoaded stops watchers that are still open', async () => {
+  const target = path.join(os.tmpdir(), `weld-clear-watch-${process.pid}.html`);
+  fsMod.writeFileSync(target, '<weld var="v">return 1;</weld>');
+
+  const page = load(target);
+  await page.ready;
+  const watcher = watch(page);
+
+  clearLoaded();                            // must close the watcher, not leak it
+
+  // Closing again is harmless once clearLoaded has done it.
+  assert.doesNotThrow(() => watcher.close());
+  fsMod.unlinkSync(target);
+});
+
+test('a loaded page reports no dependencies until it has compiled', () => {
+  const page = load(path.join(__dirname, '..', 'example', 'pages', 'with-partials.html'));
+
+  // Read synchronously, before compilation can have finished.
+  assert.deepEqual(page.dependencies, []);
+  assert.equal(page.parts, undefined);
+});
+
+test('attributes tolerate surrounding whitespace', async () => {
+  const page = await compileSource('<weld   var = "spaced"   >return 1;</weld>');
+  assert.match((await page.renderToBuffer()).toString(), /const spaced=1;/);
+
+  const empty = await compileSource('<weld   >const a = 1;</weld><p>x</p>');
+  assert.equal((await empty.renderToBuffer()).toString(), '<p>x</p>');
+});
+
+test('a request matching no dynamic route falls through', async () => {
+  const dir = fsMod.mkdtempSync(path.join(os.tmpdir(), 'weld-nomatch-'));
+  fsMod.mkdirSync(path.join(dir, 'blog'));
+  fsMod.writeFileSync(path.join(dir, 'blog', '[slug].html'), '<weld var="v">return 1;</weld>');
+
+  const mount = router(dir);
+
+  // Same segment count as /blog/:slug, but the literal segment differs.
+  let fellThrough = false;
+  mount({ method: 'GET', url: '/shop/thing' }, {}, () => { fellThrough = true; });
+  assert.ok(fellThrough, 'a non-matching path was handled instead of passed on');
+
+  fsMod.rmSync(dir, { recursive: true, force: true });
+});
+
+test('a directory tree deeper than the limit is refused', () => {
+  const dir = fsMod.mkdtempSync(path.join(os.tmpdir(), 'weld-deeptree-'));
+
+  let current = dir;
+  for (let i = 0; i < 34; i += 1) {
+    current = path.join(current, `d${i}`);
+    fsMod.mkdirSync(current);
+  }
+  fsMod.writeFileSync(path.join(current, 'page.html'), '<p>deep</p>');
+
+  assert.throws(() => router(dir), /gave up below 32 directories/);
+
+  fsMod.rmSync(dir, { recursive: true, force: true });
+});
+
 test('router refuses two files that map to the same route', () => {
   const dir = fsMod.mkdtempSync(path.join(os.tmpdir(), 'weld-dup-route-'));
   fsMod.mkdirSync(path.join(dir, 'about'));
@@ -598,9 +980,9 @@ test('malformed weld attributes are rejected with a position', async () => {
     ['<weld =bad>x</weld>', /Invalid <weld> attribute name/],
     ['<weld var>x</weld>', /requires a quoted value/],
     ['<weld var=unquoted>x</weld>', /requires a quoted value/],
-    // An unterminated quote is caught while finding the end of the tag, before
-    // attributes are parsed at all, so this is not "unclosed value".
-    ['<weld var="unclosed>x</weld>', /Unclosed <weld> opening tag/],
+    // Reported as what it is, rather than as an unclosed tag.
+    ['<weld var="unclosed>x</weld>', /Unterminated attribute value in <weld> tag/],
+    ["<weld var='unclosed>x</weld>", /Unterminated attribute value in <weld> tag/],
     ['<weld var="a" var="b">x</weld>', /Duplicate <weld> attribute "var"/]
   ];
 
