@@ -6,6 +6,12 @@ Measurements quoted here are reproducible from the notes in `TASK_PROGRESS.md`.
 
 ## Done
 
+- **Watch handles scale with directories.** Pages and shared partials reuse one OS
+  handle per directory, while `watcher.files` still lists file dependencies. Events
+  are filtered by filename; missing filenames rebuild that directory's subscribers.
+  Closing a page releases only its subscriptions and the last subscriber closes the
+  shared handle. Repeated atomic file replacement is covered by a regression test.
+
 - **The browser export contract is settled.** Exports land on one `window.weld` object rather
   than bare globals, which removes the collision class entirely: `weld` is the only name a page
   must leave alone. Breaking change to the client contract, taken deliberately while the page
@@ -77,19 +83,6 @@ page path alongside `page.filename` inside a failing run.
 - **Why it is not gating:** a permanently red build trains people to ignore it, and tuning
   timings blind against a runner nobody can reproduce on is how tests become meaningless.
 
-### watch() opens a file handle per file
-
-At 1,000 pages plus partials, development hits Linux's inotify limit (commonly 8,192) with
-`ENOSPC: System limit for number of file watchers reached` — an error that reads like a disk
-problem.
-
-- **Fix:** watch directories rather than individual files and map an event back to the
-  pages it affects.
-- **Why deferred:** reconsidered during the dependency-tracking fix and not chosen. Per-file
-  watching with reconciliation was the smaller change and kept the existing `watcher.files`
-  contract; directory watching would have needed its own event-to-page mapping on top. It only
-  bites in development at a page count nobody has reached yet.
-
 ### Setup blocks all run at boot
 
 1,000 pages run 1,000 setup blocks before the first request. Pages that open their own
@@ -115,7 +108,9 @@ A script that needs the exact text must split it (`"<wel" + "d>"`).
 
 ## Coverage
 
-99.80% lines, 98.88% branches, 97.67% functions overall. Four of six source files are at 100%
+Historical coverage, before the current performance and example changes (not a
+current coverage claim): 99.80% lines, 98.88% branches, 97.67% functions overall.
+Four of six source files were at 100%
 across all three; `compiler.js` is at 99.57 / 97.95 / 96.30 and `scanner.js` at 100 / 99.11 / 100.
 
 Two residuals, both known:
@@ -134,9 +129,9 @@ Two residuals, both known:
 - **A persistently broken page recompiles on every request** (0.45 ms versus 0.012 ms
   healthy). Accepted deliberately; revisit with a minimum retry interval if it matters.
 - **`MAX_DEPTH` is still a constant** — only the export limit became configurable.
-- **The Express example is not executed by any test**, because Express is not a dependency.
-  Its call sequence is verified against a real `http.ServerResponse`, but routing,
-  `express.static` and the error middleware are not.
+- **The Express example has wiring tests using a stub Express app**, covering CSP hashes,
+  static asset mounts, and development watcher registration. Full Express integration,
+  including static file delivery, is not executed because Express is not a dependency.
 - **`page.handler` without a `next` is a footgun.** It returns the promise rather than
   swallowing the failure, which is the right contract, but
   `http.createServer(page.handler)` therefore leaves the rejection unhandled and the first

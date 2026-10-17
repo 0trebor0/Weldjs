@@ -205,7 +205,8 @@
 
   <p>An HTML file passes through byte for byte, except for <code>&lt;weld&gt;</code> blocks.
   The page is compiled once at startup; each request re-runs only the blocks that produce data.
-  There is no HTML parser involved at any point — non-<code>&lt;weld&gt;</code> bytes are never inspected.</p>
+  There is no general HTML parser. Static bytes are preserved, and inline scripts are checked
+  for declarations that collide with the <code>weld</code> namespace.</p>
 
   <div class="note">
     <p><strong>The one thing to know first.</strong> There are two kinds of block and they behave
@@ -221,9 +222,15 @@
 
 <section id="quickstart">
   <h2>Quick start</h2>
+  <p>From the repository checkout:</p>
 <pre><code>npm test     # run the test suite
 npm start    # serve example/page.html on 127.0.0.1:3000
-npm run bench</code></pre>
+npm run bench
+npm run bench:http</code></pre>
+  <p>The library and benchmarks require Node 20+. <code>npm start</code> and the SQLite tutorial
+  require Node 22.5+ with <code>node:sqlite</code> available. The HTTP benchmark reports local
+  throughput, latency percentiles, server CPU/memory, and response verification; its slow-reader
+  workload deliberately delays consumption.</p>
 
   <p>Minimal page:</p>
 <pre><code>&lt;weld&gt;
@@ -244,7 +251,9 @@ console.log(weld.users);
 <section id="tutorial">
   <h2>Tutorial: a profile page</h2>
   <p>You will build a page that reads a user from SQLite and renders it, served by Express.
-  Every code block is complete — nothing is elided.</p>
+  Use Node 22.5+ with <code>node:sqlite</code> available and install Express. The server below
+  runs from the repository root; in an installed application, replace <code>require('./src')</code>
+  with <code>require('weldjs')</code>.</p>
 
   <h3 id="t-page">1. The page</h3>
   <p>Create <code>views/profile.html</code>:</p>
@@ -278,10 +287,10 @@ app.get('/profile', page.handler);
 app.listen(3000, () =&gt; console.log('http://127.0.0.1:3000/profile'));</code></pre>
 
   <div class="warn">
-    <p><strong>Load once, outside the route.</strong> Calling <code>load</code> or
-    <code>compileFile</code> inside the handler would recompile the file and re-run your setup on
-    every request, defeating the entire design. <code>load</code> caches by resolved path, so a
-    stray second call returns the same page rather than compiling twice.</p>
+    <p><strong>Load once, outside the route.</strong> <code>compileFile</code> inside the handler
+    recompiles and re-runs setup on every request. <code>load</code> caches by resolved path, so
+    repeated calls return the same page; keeping the call outside the route makes that lifecycle
+    explicit.</p>
   </div>
 
   <h3 id="t-setup">3. Add a setup block</h3>
@@ -332,8 +341,8 @@ return row ? { id: row.id, name: row.name } : { error: 'not found' };
   block, which is what keeps them private to one request.</p>
 
   <h3 id="t-client">5. Use it client-side</h3>
-  <p>The block is replaced at render time by a script tag, so <code>profile</code> is a normal
-  variable for anything after it:</p>
+  <p>The block is replaced at render time by a script tag, so later browser scripts read the
+  returned data as <code>weld.profile</code>:</p>
 <pre><code>&lt;script&gt;
   document.querySelector('#out').textContent = JSON.stringify(weld.profile, null, 2);
 &lt;/script&gt;</code></pre>
@@ -425,8 +434,9 @@ return row ? { id: row.id, name: row.name } : { error: 'not found' };
   <div class="warn">
     <p><strong>A plain <code>&lt;weld&gt;</code> block cannot see them at all.</strong> It runs once at
     compile time, before any request exists. Referencing <code>request</code> there throws
-    <code>ReferenceError: request is not defined</code> — and because setup runs during
-    <code>compileFile</code>, that failure stops your server at boot.</p>
+    <code>ReferenceError: request is not defined</code>. <code>compileFile</code> rejects;
+    <code>load</code> reports the error and rejects <code>page.ready</code> without automatically
+    stopping the process.</p>
   </div>
 
   <p>They are available only inside <code>&lt;weld var="…"&gt;</code> blocks, where they are the two
@@ -440,7 +450,8 @@ return { id };
 
   <p>Whatever you pass to <code>page.render(req, res)</code> is what these names refer to, so with
   Express they are the full Express <code>req</code>/<code>res</code>, including
-  <code>request.query</code>, <code>request.params</code>, and <code>request.body</code>.</p>
+  <code>request.query</code>, <code>request.params</code>, and <code>request.body</code> when
+  the appropriate body-parsing middleware has been installed.</p>
 
   <h3>Two caveats on <code>response</code></h3>
 
@@ -734,12 +745,12 @@ the emitted &lt;script&gt; payload reached 1200028 bytes</code></pre>
   empty and cannot also carry <code>var</code>.</p>
 
   <div class="ok">
-    <p><strong>Includes cost nothing per request.</strong> They are expanded once at compile time,
-    before the page is scanned, and the included markup is merged into the surrounding static runs.
-    A page with two partials still writes the same number of buffers as one without.</p>
+    <p><strong>Include expansion costs nothing per request.</strong> Files are scanned and expanded
+    at compile time, then the expanded document is scanned before compilation. Static markup is
+    merged into surrounding static runs; request blocks in partials still run on each request.</p>
   </div>
 
-  <p>Because expansion happens before scanning, an included file behaves exactly as if its contents
+  <p>Because expansion happens before compilation, an included file behaves exactly as if its contents
   were pasted in: its <code>&lt;weld&gt;</code> setup blocks join the page's setup, its
   <code>&lt;weld var&gt;</code> blocks become the page's request blocks, and a variable name used by
   both the partial and the page is caught as a duplicate at compile time.</p>
@@ -796,8 +807,14 @@ the emitted &lt;script&gt; payload reached 1200028 bytes</code></pre>
   common helmet setups need no configuration. The emitted tag becomes
   <code>&lt;script nonce="..."&gt;</code>.</p>
 
+  <p>This nonce applies to WeldJS's generated data scripts. Your own browser scripts must also
+  satisfy the policy. The shipped example loads <code>/assets/users.js</code> from the same
+  origin; its Express server allows this documentation's fixed inline scripts and styles by
+  hashes calculated at startup. Restart that server after editing those inline assets.</p>
+
   <div class="warn">
-    <p>A nonce that is not base64-shaped, or is shorter than 8 or longer than 256 characters, is
+    <p>A nonce must contain 8 to 256 base64-shaped characters, optionally followed by up to two
+    <code>=</code> padding characters. A value outside that format is
     <strong>refused</strong> rather than escaped. Escaping it would produce a tag the policy does not
     match, which fails as a silently blank page instead of a visible error.</p>
   </div>
@@ -822,8 +839,9 @@ if (process.env.NODE_ENV !== 'production') {
   existing watcher rather than opening a second one.</p>
 
   <div class="warn">
-    <p>Development only. It holds an open file handle per watched file, and a production server has
-    no reason to re-read pages it compiled at boot.</p>
+    <p>Development only. Pages share one OS watch handle per directory. Events rebuild only pages
+    subscribed to the changed file; if the OS omits its name, all subscribers in that directory
+    rebuild. A production server has no reason to re-read pages it compiled at boot.</p>
   </div>
 </section>
 
@@ -950,7 +968,7 @@ console.log(page.dependencies);   // [] before this point, populated after
   <div class="sig">await page.renderToBuffer(request?, response?)</div>
   <p>Renders to a single Buffer. Also resolves blocks concurrently, but copies the whole page, which
   measured about 16x more per-request overhead than <code>render()</code>. Use it when you need the
-  bytes rather than a response.
+  bytes rather than a response.</p>
 
   <div class="sig">page.filename &middot; page.parts</div>
   <p>The resolved path and the compiled part list
@@ -967,8 +985,9 @@ console.log(page.dependencies);   // [] before this point, populated after
 
   <div class="sig">watch(page, options?)</div>
   <p>Recompiles the page when its file, or any file it includes, changes. Development only —
-  it holds open file handles. Returns a watcher with <code>close()</code>, <code>page</code>, and
-  a live <code>files</code> list. Watching the same page twice returns the existing watcher.</p>
+  it shares directory watch handles across pages. Returns a watcher with <code>close()</code>,
+  <code>page</code>, and a live <code>files</code> list. Watching the same page twice returns the
+  existing watcher.</p>
 <pre><code>const page = load(&#39;./views/home.html&#39;);
 if (process.env.NODE_ENV !== &#39;production&#39;) watch(page);</code></pre>
   <p>The include graph is not known until the page has compiled, so the watched set is
@@ -981,8 +1000,9 @@ if (process.env.NODE_ENV !== &#39;production&#39;) watch(page);</code></pre>
   page itself, for related files that are not expressible as includes; reconciliation is then
   skipped, so includes are not added to a pinned list. A file that cannot be watched is reported
   on stderr and does not stop the others.</p>
-  <p><code>close()</code> closes every handle, cancels any rebuild still inside the debounce
-  window, and stops later reconciliation from reopening anything.
+  <p><code>close()</code> removes this page's subscriptions, releases directory handles with no
+  remaining subscribers, cancels any rebuild still inside the debounce window, and stops later
+  reconciliation from reopening anything. Other pages keep their subscriptions.
   <code>clearLoaded()</code> closes all open watchers.</p>
 
   <div class="sig">page.dependencies &middot; page.invalidate()</div>
@@ -1045,8 +1065,8 @@ if (process.env.NODE_ENV !== &#39;production&#39;) watch(page);</code></pre>
     uploads directory.</p>
   </div>
 
-  <p>Request data, by contrast, <strong>cannot</strong> reach the compiler. Compilation happens once at
-  startup from the file's bytes alone, before any request exists. A value returned from a handler is
+  <p>In the load-once flow shown here, compilation happens at startup from trusted file bytes,
+  before any request exists. Never pass request data to the compiler. A value returned from a handler is
   serialized as data and never evaluated server-side, and a string containing
   <code>&lt;/weld&gt;</code> is escaped rather than reopening a block:</p>
 
@@ -1075,7 +1095,7 @@ emitted: &lt;script&gt;(window.weld=window.weld||{}).v="require(\"fs\"); doSomet
       exhausting the stack.</li>
   </ul>
 
-  <p>Use placeholders for SQL. <code>db.prepare('… WHERE id = ?')</code> binds the value as data;
+  <p>Use placeholders for SQL. <code>db.prepare('… WHERE id = ?').get(id)</code> binds the value as data;
   interpolating it into the SQL string is both slower and an injection hole.</p>
 
   <p>The largest remaining hazard is not in the serializer but in scope discipline — see
@@ -1099,8 +1119,8 @@ emitted: &lt;script&gt;(window.weld=window.weld||{}).v="require(\"fs\"); doSomet
       constant.</li>
     <li>Exported data lands on one <code>window.weld</code> object, so the only name a page must
       leave alone is <code>weld</code> itself.</li>
-    <li><code>watch()</code> opens one file handle per watched file, which will hit the inotify
-      limit on Linux at a large enough page count.</li>
+    <li><code>watch()</code> uses one OS watch handle per distinct directory across watched pages.
+      Projects spread across very many directories can still reach platform watch limits.</li>
   </ul>
 </section>
 

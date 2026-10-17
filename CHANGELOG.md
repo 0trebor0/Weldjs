@@ -4,9 +4,20 @@
 
 ### Changed
 
+- Development watching now shares one OS handle per directory across pages and partials, filters changes to subscribed filenames, and releases a handle only after its last subscriber closes. Watching follows repeated atomic file replacement; `watcher.files` remains a file list. An OS event without a filename rebuilds the directory's subscribers.
 - Compiling pages without includes reuses the initial scan instead of parsing each document twice, reducing startup work for large page collections. Pages with includes keep the final expanded-document validation.
 - Large exports reuse fixed script escapes and measure only the script wrapper after the serialized data has been counted. This reduces work for HTML text and Unicode payloads while preserving emitted bytes, exact per-render size limits, CSP nonces, and validation.
 - `npm run bench` now also measures large ASCII, Unicode, HTML-text, and row exports through both render paths, plus compilation of 1,000 retained pages. Render timings isolate CPU work and do not measure HTTP throughput.
+
+### Added
+
+- `npm run bench:http` measures concurrent HTTP workloads against 1,000 routed pages, including large exports and slow readers. It verifies response bytes and request isolation, reports latency percentiles, throughput, separate server CPU/memory, errors, and backpressure drain events, and cleans up its temporary project. Use `npm run bench:http -- --smoke` for a short check.
+
+### Fixed
+
+- The users demo loads its browser code from `/assets/users.js`, served by both example servers, so Express's strict CSP no longer blocks the display script. Documentation inline scripts and styles are allowed by their exact SHA-256 hashes, without enabling arbitrary inline code.
+- The Express demo now watches its includes page as well as `/users` in development, so edits to the example header and footer take effect without restarting.
+- README and full documentation now match source-buffer ownership, cached loading, namespaced browser data, SQLite requirements, benchmark commands, and example routes. The README Express snippet includes its required imports; older coverage measurements are marked historical.
 
 ## Unreleased — 2026-08-16 (CI fixes)
 

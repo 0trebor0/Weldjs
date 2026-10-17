@@ -375,6 +375,7 @@ test('the shipped example page compiles and exports its rows', {
 
   assert.match(output, /\)\.users=\[/, 'the example did not export its rows');
   assert.ok(output.includes('weld.users'), 'the example page does not read weld.users');
+  assert.match(output, /<script src="\/assets\/users\.js"><\/script>/);
 });
 
 function rawRequest(port, line) {
@@ -2453,6 +2454,48 @@ test('a failed directory watch reports the error and can retry without leaking h
     fsMod.watch = realWatch;
     console.error = realError;
     if (subscription) subscription.close();
+    fsMod.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a pinned directory dependency still rebuilds on changes to its children', async () => {
+  const dir = fsMod.mkdtempSync(path.join(os.tmpdir(), 'weld-watch-directory-'));
+  const target = path.join(dir, 'page.html');
+  fsMod.writeFileSync(target, '<p>page</p>');
+  const page = load(target);
+  await page.ready;
+  let changes = 0;
+  const subscription = watch(page, { dependencies: [dir], onChange: () => { changes += 1; } });
+
+  try {
+    fsMod.writeFileSync(path.join(dir, 'data.json'), '{}');
+    assert.ok(await waitFor(() => changes, (count) => count > 0));
+    assert.deepEqual(subscription.files, [target, dir]);
+  } finally {
+    subscription.close();
+    fsMod.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('dropping one Windows filename alias keeps the remaining subscription', {
+  skip: process.platform !== 'win32' && 'Windows filenames are case-insensitive'
+}, async () => {
+  const dir = fsMod.mkdtempSync(path.join(os.tmpdir(), 'weld-watch-alias-'));
+  const target = path.join(dir, 'page.html');
+  const partial = path.join(dir, 'partial.html');
+  fsMod.writeFileSync(partial, '<p>one</p>');
+  fsMod.writeFileSync(target, '<weld src="partial.html"></weld><weld src="PARTIAL.HTML"></weld>');
+  const page = load(target);
+  await page.ready;
+  const subscription = watch(page);
+
+  try {
+    fsMod.writeFileSync(target, '<weld src="PARTIAL.HTML"></weld>');
+    assert.equal(await waitFor(() => page.dependencies.length, (count) => count === 1), 1);
+    fsMod.writeFileSync(partial, '<p>two</p>');
+    assert.match(await waitForOutput(page, /two/), /two/);
+  } finally {
+    subscription.close();
     fsMod.rmSync(dir, { recursive: true, force: true });
   }
 });

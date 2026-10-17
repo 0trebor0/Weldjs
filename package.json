@@ -32,7 +32,8 @@
   "scripts": {
     "test": "node --test",
     "start": "node example/server.js",
-    "bench": "node benchmark.js"
+    "bench": "node benchmark.js",
+    "bench:http": "node benchmark-http.js"
   },
   "engines": {
     "node": ">=20"

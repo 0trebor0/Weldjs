@@ -12,7 +12,7 @@ npm install weldjs
 
 Two files. Copy them, run them, and it works.
 
-**`page.html`** — an ordinary HTML file with two `<weld>` blocks:
+**`page.html`** — an ordinary HTML file with one `<weld>` block:
 
 ```html
 <!doctype html>
@@ -124,7 +124,8 @@ return await db.users();
   so the browser reads it as `weld.name`.
 - **`<weld src="partials/header.html">`** includes another file at compile time, so
   layouts cost nothing per request.
-- All non-`<weld>` HTML is retained as slices of the original Buffer.
+- Non-`<weld>` HTML is copied into static buffers once at compile time; the original
+  source Buffer is not retained.
 - Blocks on a page run **concurrently**, so the cost is the slowest block, not the sum.
 - Nothing is written until the whole response is known to succeed, so a failing block
   gives a clean error rather than a truncated page under an already-sent 200.
@@ -136,7 +137,9 @@ Beyond that:
 - **`router(dir)`** maps a directory of `.html` files to routes, including `[slug]`
   parameters.
 - **`watch(page)`** recompiles on edit during development, tracking files pulled in by
-  `<weld src>` as they are added and removed.
+  `<weld src>` as they are added and removed. Pages share one OS watch handle per
+  directory; edits rebuild only the pages subscribed to that file. If the OS omits
+  the filename, all subscribers in that directory rebuild.
 - **`shared(key, factory)`** is a process-wide resource cache for setup blocks.
 - **`page.handler`** is a ready-made route handler: `app.get('/', page.handler)` renders,
   ends the response, and forwards errors to `next`.
@@ -149,12 +152,12 @@ process-shared state, not per-request state:
 
 ```html
 <weld>
-let currentUser = null;              ❌ shared by every request
+let currentUser = null;              // ❌ shared by every request
 </weld>
 <weld var="profile">
-currentUser = request.query.user;    ❌ another request can overwrite this
+currentUser = request.query.user;    // ❌ another request can overwrite this
 const row = await lookup(currentUser);
-return { name: currentUser };        ❌ may now be someone else's value
+return { name: currentUser };        // ❌ may now be someone else's value
 </weld>
 ```
 
@@ -162,10 +165,10 @@ Keep per-request values local to the block:
 
 ```html
 <weld>
-const db = await shared('db', () => openDatabase());   ✅ genuinely shared
+const db = await shared('db', () => openDatabase());   // ✅ genuinely shared
 </weld>
 <weld var="profile">
-const user = request.query.user;     ✅ local to this invocation
+const user = request.query.user;     // ✅ local to this invocation
 return { user, rows: await db.recentFor(user) };
 </weld>
 ```
@@ -178,6 +181,8 @@ the page is safe.
 ## Express
 
 ```js
+const path = require('node:path');
+const express = require('express');
 const { load } = require('weldjs');
 
 const page = load(path.join(__dirname, 'page.html'));
@@ -190,8 +195,17 @@ app.listen(3000);
 Use `res.setHeader(...)` rather than `res.writeHead(...)` — `writeHead` marks the headers
 as sent, which stops `render()` adding `Content-Length`.
 
-`example/express-server.js` shows the same page with static docs and an error handler.
-Express is not a dependency, so install it yourself to run that example:
+`example/express-server.js` serves the SQLite users page at `/users`, file-routed
+pages at `/`, `/about`, `/blog`, `/blog/:slug`, and `/with-partials`, and the full
+documentation at `/docs`. In development it watches `/users` and `/with-partials`,
+including the latter's header and footer. Watching is disabled in production.
+
+Both shipped demo servers require **Node 22.5+** for `node:sqlite`. They serve
+`example/public/users.js` at `/assets/users.js`; the users page reads `weld.users`
+from this external script so it works under the Express demo's strict CSP.
+Documentation inline scripts and styles are allowed by hashes calculated at
+startup; restart that demo after changing those inline assets. Express is optional
+and is not a library dependency. Install it where you run the Express demo:
 
 ```bash
 npm install express
@@ -221,6 +235,9 @@ JSON-compatible primitives, arrays, and plain objects. Enforced at render time:
 
 ## Documentation
 
+The API is pre-1.0. The browser contract is `window.weld.<name>`; low-level exports
+such as `scan`, `serialize`, and `page.parts` should be treated as internals.
+
 Full docs — tutorial, guide, API reference, and security notes — are a single
 self-contained page at [`docs/index.html`](docs/index.html). Open it directly, or serve it:
 
@@ -228,7 +245,7 @@ self-contained page at [`docs/index.html`](docs/index.html). Open it directly, o
 app.use('/docs', express.static(path.join(__dirname, 'docs')));
 ```
 
-Open work and known risks are tracked in [`TODO.md`](TODO.md); released changes in
+Open work and known risks are tracked in [`TODO.md`](TODO.md); change history in
 [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Requirements
@@ -243,10 +260,24 @@ npm test
 therefore needs **Node 22.5 or newer**. The library itself does not — the test that
 compiles that example is skipped below 22.5, and everything else runs on Node 20.
 
-Run `npm run bench` to measure compilation of 1,000 retained pages and rendering
+From this repository checkout, run `npm run bench` to measure compilation of
+1,000 retained pages and rendering
 of small exports, large strings, HTML text, and 2,000-row payloads. It reports both
 `renderToBuffer()` and `render()` CPU timings; the latter uses a no-socket sink,
 so these results do not measure HTTP throughput or client backpressure.
+
+From this repository checkout, run `npm run bench:http` for a real HTTP benchmark
+of 1,000 file-routed pages.
+It runs concurrent small exports, large row exports, and slow readers, checking
+every response byte, request-specific user, and `Content-Length`. Each workload
+runs its server in a separate child process and reports requests/sec, p50/p95/p99
+latency, server CPU milliseconds and percent of one core, sampled peak RSS/heap,
+process-lifetime peak RSS (including startup), errors, and backpressure drain events.
+Memory is sampled every 10 ms and may miss short peaks; CPU percent can exceed 100
+when Node uses multiple threads. The client and server share this machine, so these
+are local measurements, not deployment capacity estimates. For a short verification
+run, use `npm run bench:http -- --smoke`. Temporary project files are created inside
+this repository and removed afterward.
 
 ## Limitations
 

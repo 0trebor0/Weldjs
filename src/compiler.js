@@ -41,8 +41,8 @@ return [${handlerList}];
 
 // Removing setup blocks leaves runs of static HTML separated only by the gap the
 // block occupied, so those runs are joined once at compile time. A request then
-// writes one buffer per run instead of one per original slice. A run of a single
-// slice stays a zero-copy view over the source.
+// writes one buffer per run instead of one per original slice. Each run gets its
+// own allocation so the original source can be collected.
 function buildRuntimeParts(parsed, handlers) {
   const runtimeParts = [];
   let pending = [];
@@ -580,10 +580,9 @@ function watch(page, options = {}) {
     pinned = options.dependencies.map((file) => path.resolve(file));
   }
 
-  // Every file this watcher is responsible for, whether or not a handle could
-  // actually be opened for it, and the handles that were opened. They differ
-  // when a file is missing: reporting the intent is more useful than reporting
-  // what the OS happened to allow.
+  // Every file this watcher is responsible for, and its subscriptions to shared
+  // directory handles. They differ when a file is missing: reporting the intent
+  // is more useful than reporting what the OS happened to allow.
   const wanted = new Set([page.filename]);
   const handles = new Map();
   // Suppresses a repeated error for the same unwatchable file. Reconciliation
@@ -613,7 +612,7 @@ function watch(page, options = {}) {
             // than lose a change that cannot be narrowed down safely.
             const callbacks = new Set();
             for (const listeners of subscribers.values()) {
-              for (const listener of listeners) callbacks.add(listener);
+              for (const listener of listeners.keys()) callbacks.add(listener);
             }
             for (const callback of callbacks) callback();
             return;
@@ -624,10 +623,10 @@ function watch(page, options = {}) {
           const callbacks = subscribers.get(changedKey);
           const directoryCallbacks = subscribers.get(null);
           if (directoryCallbacks !== undefined) {
-            for (const callback of directoryCallbacks) callback();
+            for (const callback of directoryCallbacks.keys()) callback();
           }
           if (callbacks !== undefined) {
-            for (const callback of callbacks) callback();
+            for (const callback of callbacks.keys()) callback();
           }
         });
         entry = { handle, subscribers };
@@ -636,10 +635,10 @@ function watch(page, options = {}) {
 
       let callbacks = entry.subscribers.get(key);
       if (callbacks === undefined) {
-        callbacks = new Set();
+        callbacks = new Map();
         entry.subscribers.set(key, callbacks);
       }
-      callbacks.add(rebuild);
+      callbacks.set(rebuild, (callbacks.get(rebuild) || 0) + 1);
       handles.set(target, { entry, directory, key });
       reported.delete(target);
     } catch (error) {
@@ -656,7 +655,9 @@ function watch(page, options = {}) {
     if (subscription === undefined) return;
     const { entry, directory, key } = subscription;
     const callbacks = entry.subscribers.get(key);
-    callbacks.delete(rebuild);
+    const remaining = callbacks.get(rebuild) - 1;
+    if (remaining === 0) callbacks.delete(rebuild);
+    else callbacks.set(rebuild, remaining);
     if (callbacks.size === 0) entry.subscribers.delete(key);
 
     if (entry.subscribers.size === 0) {
@@ -667,10 +668,9 @@ function watch(page, options = {}) {
   }
 
   // Brings the watched set in line with the page's current include graph:
-  // handles for files no longer referenced are closed, and files newly pulled in
-  // get one. Without this, an include added after startup would never rebuild
-  // the page, and one removed would keep a handle open for the life of the
-  // process.
+  // subscriptions for files no longer referenced are removed, and newly pulled
+  // in files get one. Without this, an include added after startup would never
+  // rebuild the page, and one removed would keep its subscription indefinitely.
   function reconcile() {
     if (closed || pinned !== null) return;
 
