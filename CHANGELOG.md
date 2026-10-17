@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased — 2026-10-17
+
+### Changed
+
+- Compiling pages without includes reuses the initial scan instead of parsing each document twice, reducing startup work for large page collections. Pages with includes keep the final expanded-document validation.
+- Large exports reuse fixed script escapes and measure only the script wrapper after the serialized data has been counted. This reduces work for HTML text and Unicode payloads while preserving emitted bytes, exact per-render size limits, CSP nonces, and validation.
+- `npm run bench` now also measures large ASCII, Unicode, HTML-text, and row exports through both render paths, plus compilation of 1,000 retained pages. Render timings isolate CPU work and do not measure HTTP throughput.
+
 ## Unreleased — 2026-08-16 (CI fixes)
 
 ### Changed

@@ -93,6 +93,36 @@ return request.method;
   assert.match(output, /\)\.method="POST"/);
 });
 
+test('compiling a page collection preserves each setup closure and request value', async () => {
+  const pages = [];
+  for (let i = 0; i < 64; i += 1) {
+    const source = `<p>Page ${i}</p><weld>const pageId = ${i};</weld>` +
+      '<weld var="data">return { pageId, user: request.user };</weld>';
+    pages.push(await compileSource(i % 2 === 0 ? source : Buffer.from(source)));
+  }
+
+  for (const user of ['alice', 'bob']) {
+    const outputs = await Promise.all(pages.map((page) => page.renderToBuffer({ user })));
+    for (let i = 0; i < pages.length; i += 1) {
+      assert.equal(outputs[i].toString(), `<p>Page ${i}</p>` +
+        `<script>(window.weld=window.weld||{}).data={"pageId":${i},"user":"${user}"};</script>`);
+      assert.deepEqual(pages[i].dependencies, []);
+    }
+  }
+});
+
+test('pages without includes preserve empty and static input bytes after compilation', async () => {
+  for (const source of ['', '<p>日本語 🎉</p>', '<weld>const unused = 1;</weld>']) {
+    const input = Buffer.from(source);
+    const expected = source.startsWith('<weld>') ? Buffer.alloc(0) : Buffer.from(input);
+    const page = await compileSource(input);
+    input.fill(0);
+
+    assert.deepEqual(await page.renderToBuffer(), expected);
+    assert.deepEqual(page.dependencies, []);
+  }
+});
+
 test('serializer prevents script-tag breakout', () => {
   const result = serialize('</script><script>alert(1)</script>');
   assert.ok(!result.includes('</script>'));
@@ -1568,6 +1598,16 @@ test('line separators and ampersands are escaped', () => {
   assert.equal(serialize(input), '"a\\u2028b\\u2029c\\u0026d"');
 });
 
+test('large mixed strings and object keys preserve all five script escapes', () => {
+  const text = '&<>\u2028\u2029日本🎉'.repeat(2000);
+  const escaped = '\\u0026\\u003c\\u003e\\u2028\\u2029日本🎉'.repeat(2000);
+  const value = { [text]: text };
+  const output = serialize(value);
+
+  assert.equal(output, `{"${escaped}":"${escaped}"}`);
+  assert.deepEqual(JSON.parse(output), value);
+});
+
 test('adjacent static html is merged into one buffer per run', async () => {
   const page = await compileSource(
     '<p>a</p><weld>const x = 1;</weld><p>b</p><weld var="v">return x;</weld><p>c</p>'
@@ -1932,6 +1972,40 @@ test('the script wrapper and the nonce count towards the limit', async () => {
   );
 });
 
+test('large mixed exports across blocks enforce the exact nonce-inclusive limit atomically', async () => {
+  const source = '<weld var="first">return request.first;</weld>' +
+    '<weld var="second">return request.second;</weld>';
+  const nonce = 'YWJjZGVmZ2hpamts';
+  const request = {
+    first: '&<>\u2028\u2029日本🎉'.repeat(2000),
+    second: 'é'.repeat(2000)
+  };
+  const escaped = '\\u0026\\u003c\\u003e\\u2028\\u2029日本🎉'.repeat(2000);
+  const expected = Buffer.from(
+    `<script nonce="${nonce}">(window.weld=window.weld||{}).first="${escaped}";</script>` +
+    `<script nonce="${nonce}">(window.weld=window.weld||{}).second="${request.second}";</script>`
+  );
+  const page = await compileSource(source, { maxExportBytes: expected.length });
+  const response = fakeResponse();
+  response.locals = { cspNonce: nonce };
+
+  assert.deepEqual(await page.renderToBuffer(request, response), expected);
+  await page.render(request, response);
+  assert.deepEqual(Buffer.concat(response.chunks), expected);
+  assert.equal(response.headers['content-length'], expected.length);
+  assert.deepEqual(runEmittedScripts(expected.toString()), request);
+
+  const tight = await compileSource(source, { maxExportBytes: expected.length - 1 });
+  const failed = fakeResponse();
+  failed.locals = { cspNonce: nonce };
+  const message = new RegExp(`the emitted <script> payload reached ${expected.length} bytes`);
+
+  await assert.rejects(() => tight.renderToBuffer(request, failed), message);
+  await assert.rejects(() => tight.render(request, failed), message);
+  assert.equal(failed.chunks.length, 0);
+  assert.equal(failed.headers['content-length'], undefined);
+});
+
 test('the exact byte check reports the limit and the size reached', async () => {
   const page = await stringPage('"<".repeat(1000)', 4096);
 
@@ -2169,9 +2243,8 @@ test('repeated rebuilds do not accumulate watchers for the same file', async () 
   try {
     assert.match((await page.renderToBuffer()).toString(), /<header>4<\/header>/);
     assert.equal(watcher.files.length, 2, 'the watched set grew across rebuilds');
-    // Reconciliation must reuse the handles it already holds rather than
-    // opening a fresh one for the same path on every rebuild.
-    assert.equal(opened.length, 2, 'opened ' + opened.length + ' handles for 2 files');
+    // Both files share a directory handle, which reconciliation must retain.
+    assert.equal(opened.length, 1, 'opened ' + opened.length + ' handles for 1 directory');
   } finally {
     watcher.close();
     fsMod.rmSync(dir, { recursive: true, force: true });
@@ -2237,6 +2310,149 @@ test('an explicit dependency list is not overwritten by reconciliation', async (
     assert.match((await page.renderToBuffer()).toString(), /\)\.v=1;/);
   } finally {
     watcher.close();
+    fsMod.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a page collection shares directory handles and releases them after the last subscriber', async () => {
+  const dir = fsMod.mkdtempSync(path.join(os.tmpdir(), 'weld-watch-collection-'));
+  const partialDir = path.join(dir, 'partials');
+  fsMod.mkdirSync(partialDir);
+  const partial = path.join(partialDir, 'header.html');
+  fsMod.writeFileSync(partial, '<header>one</header>');
+  const pages = [];
+  const subscriptions = [];
+  const opened = [];
+  let closed = 0;
+  const realWatch = fsMod.watch;
+
+  try {
+    for (let i = 0; i < 100; i += 1) {
+      const target = path.join(dir, `page${i}.html`);
+      fsMod.writeFileSync(target, '<weld src="partials/header.html"></weld>');
+      pages.push(load(target));
+    }
+    await Promise.all(pages.map((page) => page.ready));
+    fsMod.watch = (...args) => {
+      const handle = realWatch(...args);
+      opened.push(args[0]);
+      handle.once('close', () => { closed += 1; });
+      return handle;
+    };
+    for (const page of pages) subscriptions.push(watch(page));
+    assert.deepEqual(opened.sort(), [dir, partialDir].sort());
+    assert.equal(subscriptions[0].files.length, 2);
+
+    subscriptions[0].close();
+    subscriptions[0].close();
+    fsMod.writeFileSync(partial, '<header>two</header>');
+    assert.match(await waitForOutput(pages[99], /two/), /two/);
+    assert.match((await pages[0].renderToBuffer()).toString(), /one/);
+    assert.equal(closed, 0, 'closed a handle still needed by other pages');
+
+    clearLoaded();
+    assert.equal(await waitFor(() => closed, (count) => count === 2), 2);
+  } finally {
+    fsMod.watch = realWatch;
+    for (const subscription of subscriptions) subscription.close();
+    fsMod.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('directory watch events filter filenames and handle Buffer or missing filenames', async () => {
+  const dir = fsMod.mkdtempSync(path.join(os.tmpdir(), 'weld-watch-events-'));
+  const first = path.join(dir, 'first.html');
+  const second = path.join(dir, 'second.html');
+  fsMod.writeFileSync(first, '<p>one</p>');
+  fsMod.writeFileSync(second, '<p>one</p>');
+  const pages = [load(first), load(second)];
+  await Promise.all(pages.map((page) => page.ready));
+  const realWatch = fsMod.watch;
+  const subscriptions = [];
+  const changes = [0, 0];
+  let event;
+
+  try {
+    fsMod.watch = (directory, options, listener) => {
+      assert.equal(directory, dir);
+      event = listener;
+      return { close() {} };
+    };
+    for (let i = 0; i < pages.length; i += 1) {
+      subscriptions.push(watch(pages[i], { onChange: () => { changes[i] += 1; } }));
+    }
+    event('change', 'unrelated.txt');
+    await settle();
+    assert.deepEqual(changes, [0, 0]);
+
+    fsMod.writeFileSync(first, '<p>two</p>');
+    event('rename', Buffer.from(process.platform === 'win32' ? 'FIRST.HTML' : 'first.html'));
+    assert.match(await waitForOutput(pages[0], /two/), /two/);
+    assert.deepEqual(changes, [1, 0]);
+
+    fsMod.writeFileSync(first, '<p>three</p>');
+    fsMod.writeFileSync(second, '<p>three</p>');
+    event('change', null);
+    for (const page of pages) assert.match(await waitForOutput(page, /three/), /three/);
+    assert.deepEqual(changes, [2, 1]);
+  } finally {
+    fsMod.watch = realWatch;
+    for (const subscription of subscriptions) subscription.close();
+    fsMod.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('directory watching follows repeated atomic file replacement', async () => {
+  const dir = fsMod.mkdtempSync(path.join(os.tmpdir(), 'weld-watch-replace-'));
+  const target = path.join(dir, 'page.html');
+  const draft = path.join(dir, 'draft.tmp');
+  fsMod.writeFileSync(target, '<p>one</p>');
+  const page = load(target);
+  await page.ready;
+  const subscription = watch(page);
+
+  try {
+    for (const version of ['two', 'three']) {
+      fsMod.writeFileSync(draft, `<p>${version}</p>`);
+      fsMod.renameSync(draft, target);
+      assert.match(await waitForOutput(page, new RegExp(version)), new RegExp(version));
+    }
+  } finally {
+    subscription.close();
+    fsMod.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a failed directory watch reports the error and can retry without leaking handles', async () => {
+  const dir = fsMod.mkdtempSync(path.join(os.tmpdir(), 'weld-watch-open-error-'));
+  const target = path.join(dir, 'page.html');
+  fsMod.writeFileSync(target, '<p>one</p>');
+  const page = load(target);
+  await page.ready;
+  const realWatch = fsMod.watch;
+  const realError = console.error;
+  const errors = [];
+  let attempts = 0;
+  let subscription;
+
+  try {
+    console.error = (message) => errors.push(message);
+    fsMod.watch = (...args) => {
+      attempts += 1;
+      if (attempts === 1) throw Object.assign(new Error('watch limit'), { code: 'ENOSPC' });
+      return realWatch(...args);
+    };
+    subscription = watch(page);
+    assert.equal(errors.length, 1);
+    assert.match(errors[0], /cannot watch.*watch limit/);
+    assert.equal(attempts, 2, 'reconciliation did not retry opening the directory');
+    fsMod.writeFileSync(target, '<p>two</p>');
+    assert.match(await waitForOutput(page, /two/), /two/);
+    assert.equal(attempts, 2, 'rebuild opened another directory handle');
+  } finally {
+    fsMod.watch = realWatch;
+    console.error = realError;
+    if (subscription) subscription.close();
     fsMod.rmSync(dir, { recursive: true, force: true });
   }
 });

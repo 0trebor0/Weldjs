@@ -156,7 +156,9 @@ function expandIncludes(source, filename, chain, depth, dependencies) {
 
   const parsed = scanFile(source, filename);
   const includes = parsed.parts.filter((part) => part.type === 'weld' && part.mode === 'include');
-  if (includes.length === 0) return parsed.source;
+  // Keep the scan result when no expansion is needed, so compiling a large
+  // page collection does not scan each unchanged document a second time.
+  if (includes.length === 0) return { source: parsed.source, parsed };
 
   const directory = path.dirname(filename);
   const pieces = [];
@@ -183,13 +185,13 @@ function expandIncludes(source, filename, chain, depth, dependencies) {
 
     pieces.push(parsed.source.subarray(cursor, part.tagStart));
     pieces.push(
-      expandIncludes(included, resolved, [...chain, resolved], depth + 1, dependencies)
+      expandIncludes(included, resolved, [...chain, resolved], depth + 1, dependencies).source
     );
     cursor = part.tagEnd;
   }
 
   pieces.push(parsed.source.subarray(cursor));
-  return Buffer.concat(pieces);
+  return { source: Buffer.concat(pieces), parsed: null };
 }
 
 async function compileSource(input, options = {}) {
@@ -216,7 +218,7 @@ async function compileSource(input, options = {}) {
   const dependencies = new Set();
   const expanded = expandIncludes(input, filename, [filename], 0, dependencies);
 
-  const parsed = scanFile(expanded, filename);
+  const parsed = expanded.parsed || scanFile(expanded.source, filename);
   if (options.warnOnMutableSetup !== false) warnAboutMutableSetup(parsed, filename);
 
   const factorySource = buildFactorySource(parsed);
@@ -535,6 +537,11 @@ function load(filename) {
 // page is never watched twice.
 const watchers = new Map();
 
+// Pages in the same directory share one OS handle, including pages that share
+// partials. Each filename retains its own subscribers so an unrelated edit
+// does not recompile every page in that directory.
+const directoryWatchers = new Map();
+
 // Recompiles a page when its file, or any file it includes, changes. Development
 // only: it holds open file watchers and lets a running server pick up edits
 // without a restart.
@@ -589,7 +596,51 @@ function watch(page, options = {}) {
     if (handles.has(target)) return;
 
     try {
-      handles.set(target, fs.watch(target, { persistent: false }, rebuild));
+      // Preserve the missing-file diagnostic even when its parent directory
+      // already has a shared watcher.
+      const stats = fs.statSync(target);
+      const directory = stats.isDirectory() ? target : path.dirname(target);
+      const basename = path.basename(target);
+      const key = stats.isDirectory() ? null :
+        (process.platform === 'win32' ? basename.toLowerCase() : basename);
+      let entry = directoryWatchers.get(directory);
+
+      if (entry === undefined) {
+        const subscribers = new Map();
+        const handle = fs.watch(directory, { persistent: false }, (event, filename) => {
+          if (filename === null) {
+            // Some platforms omit the filename. Rebuild subscribers rather
+            // than lose a change that cannot be narrowed down safely.
+            const callbacks = new Set();
+            for (const listeners of subscribers.values()) {
+              for (const listener of listeners) callbacks.add(listener);
+            }
+            for (const callback of callbacks) callback();
+            return;
+          }
+
+          const changed = filename.toString();
+          const changedKey = process.platform === 'win32' ? changed.toLowerCase() : changed;
+          const callbacks = subscribers.get(changedKey);
+          const directoryCallbacks = subscribers.get(null);
+          if (directoryCallbacks !== undefined) {
+            for (const callback of directoryCallbacks) callback();
+          }
+          if (callbacks !== undefined) {
+            for (const callback of callbacks) callback();
+          }
+        });
+        entry = { handle, subscribers };
+        directoryWatchers.set(directory, entry);
+      }
+
+      let callbacks = entry.subscribers.get(key);
+      if (callbacks === undefined) {
+        callbacks = new Set();
+        entry.subscribers.set(key, callbacks);
+      }
+      callbacks.add(rebuild);
+      handles.set(target, { entry, directory, key });
       reported.delete(target);
     } catch (error) {
       // A dependency that cannot be watched should not stop the others.
@@ -601,9 +652,17 @@ function watch(page, options = {}) {
   }
 
   function unwatchFile(target) {
-    const handle = handles.get(target);
-    if (handle === undefined) return;
-    handle.close();
+    const subscription = handles.get(target);
+    if (subscription === undefined) return;
+    const { entry, directory, key } = subscription;
+    const callbacks = entry.subscribers.get(key);
+    callbacks.delete(rebuild);
+    if (callbacks.size === 0) entry.subscribers.delete(key);
+
+    if (entry.subscribers.size === 0) {
+      entry.handle.close();
+      directoryWatchers.delete(directory);
+    }
     handles.delete(target);
   }
 
@@ -634,6 +693,7 @@ function watch(page, options = {}) {
   // Editors often write a file as several events; a short debounce collapses
   // them into one rebuild instead of compiling the same file three times.
   function rebuild() {
+    if (closed) return;
     if (timer !== null) clearTimeout(timer);
     timer = setTimeout(() => {
       timer = null;
@@ -676,6 +736,7 @@ function watch(page, options = {}) {
       return Object.freeze([...wanted]);
     },
     close() {
+      if (closed) return;
       closed = true;
       if (timer !== null) {
         clearTimeout(timer);

@@ -243,6 +243,11 @@ npm test
 therefore needs **Node 22.5 or newer**. The library itself does not — the test that
 compiles that example is skipped below 22.5, and everything else runs on Node 20.
 
+Run `npm run bench` to measure compilation of 1,000 retained pages and rendering
+of small exports, large strings, HTML text, and 2,000-row payloads. It reports both
+`renderToBuffer()` and `render()` CPU timings; the latter uses a no-socket sink,
+so these results do not measure HTTP throughput or client backpressure.
+
 ## Limitations
 
 - Literal `<weld>` / `</weld>` sequences are reserved delimiters anywhere in the file.

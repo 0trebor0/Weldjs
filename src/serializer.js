@@ -15,12 +15,20 @@ const MAX_DEPTH = 64;
 const MAX_EXPORT_BYTES = 1024 * 1024;
 
 // & < > and the U+2028/U+2029 line separators are the characters that can break
-// out of, or prematurely terminate, the generated <script> element. Each one is
-// replaced by its own \uXXXX escape, so no lookup table is needed.
+// out of, or prematurely terminate, the generated <script> element. Reuse their
+// fixed escapes instead of converting to hexadecimal for every occurrence in
+// large HTML-text exports.
 const ESCAPE_PATTERN = /[&<>\u2028\u2029]/g;
+const ESCAPES = {
+  '&': '\\u0026',
+  '<': '\\u003c',
+  '>': '\\u003e',
+  '\u2028': '\\u2028',
+  '\u2029': '\\u2029'
+};
 
 function escapeChar(char) {
-  return `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`;
+  return ESCAPES[char];
 }
 
 // One budget covers a whole render rather than a single value. The cap exists to
@@ -191,35 +199,30 @@ const NONCE_PATTERN = /^[A-Za-z0-9+/_-]{8,256}={0,2}$/;
 // be the first to run. An export overwrites whatever the property held before.
 const NAMESPACE = 'weld';
 
-function assignment(name, serialized) {
-  return `(window.${NAMESPACE}=window.${NAMESPACE}||{}).${name}=${serialized};`;
-}
-
 function clientScript(name, value, nonce, budget = createBudget()) {
   const serialized = serialize(value, budget);
-  let script;
+  let openingTag = '<script>';
 
-  if (nonce === undefined || nonce === null) {
-    script = `<script>${assignment(name, serialized)}</script>`;
-  } else {
+  if (nonce !== undefined && nonce !== null) {
     if (typeof nonce !== 'string' || !NONCE_PATTERN.test(nonce)) {
       throw new TypeError(
         'CSP nonce must be a base64-ish string of 8 to 256 characters'
       );
     }
 
-    script = `<script nonce="${nonce}">${assignment(name, serialized)}</script>`;
+    openingTag = `<script nonce="${nonce}">`;
   }
+
+  const prefix = `${openingTag}(window.${NAMESPACE}=window.${NAMESPACE}||{}).${name}=`;
+  const suffix = ';</script>';
 
   // The limit covers the whole emitted element, so the tags, the variable name
   // and the nonce attribute are charged too. serialize() has already charged the
-  // data, so only the wrapper is added here.
-  spendBytes(
-    budget,
-    Buffer.byteLength(script, 'utf8') - Buffer.byteLength(serialized, 'utf8')
-  );
+  // data, so measure only the wrapper rather than scanning the large payload
+  // twice more to subtract its size from the finished script.
+  spendBytes(budget, Buffer.byteLength(prefix, 'utf8') + suffix.length);
 
-  return Buffer.from(script);
+  return Buffer.from(`${prefix}${serialized}${suffix}`);
 }
 
 module.exports = {
